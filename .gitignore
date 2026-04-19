@@ -1,0 +1,11 @@
+worker/node_modules/
+worker/.dev.vars
+worker/.wrangler/
+.DS_Store
+**/xcuserdata/
+.cursor/debug*.log
+*.xcuserstate
+build/
+releases/
+.claude/
+coding-plans/
