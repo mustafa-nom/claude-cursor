@@ -185,6 +185,29 @@ enum DS {
         static var disabledText: Color {
             textPrimary.opacity(0.38)
         }
+
+        // ── Chat Sessions Sidebar ──────────────────────────────────
+        // Granola/shadcn-inspired tokens for the chat sidebar in the
+        // floating chat panel. Sidebar sits one notch deeper than surface1
+        // so it reads as a "rail" rather than a card.
+
+        /// Sidebar rail background — one notch darker than `surface1`
+        /// so the divider between sidebar and transcript is legible.
+        static let sidebarBackground = Color(hex: "#121413")
+
+        /// Subtle fill behind a sidebar row on hover. Matches `surface3`
+        /// in weight but warmer so selected + hover stack is distinguishable.
+        static let sidebarRowHover = Color(hex: "#1E2120")
+
+        /// Selected-row fill in the sidebar. Low-opacity terracotta so the
+        /// selection is visible without shouting next to dense text.
+        static let sidebarRowSelected = brand500.opacity(0.14)
+
+        /// ALL-CAPS date section labels ("TODAY", "YESTERDAY").
+        static let sidebarSectionLabel = Color(hex: "#7A8380")
+
+        /// Collapsible folder caret glyph color at rest.
+        static let sidebarCaret = Color(hex: "#6B736F")
     }
 
     /// Always-light “paper” tokens for the menu bar companion panel only.
@@ -247,6 +270,16 @@ enum DS {
         static let xl: CGFloat = 20
         static let xxl: CGFloat = 24
         static let xxxl: CGFloat = 32
+
+        // ── Chat Sidebar ─────────────────────────────────────────────
+        /// Vertical padding inside each sidebar row. Tight on purpose so
+        /// more sessions fit visible per screen.
+        static let sidebarRowVertical: CGFloat = 6
+
+        /// Horizontal indent added per nesting level in the sidebar
+        /// (e.g. "Chrome > Linear > task"). Smaller than the global
+        /// `md` so three-deep nesting still fits in 220pt.
+        static let sidebarRowIndentPerLevel: CGFloat = 14
     }
 
     // MARK: - Corner Radii

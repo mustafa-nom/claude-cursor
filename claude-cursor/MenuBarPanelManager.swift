@@ -139,6 +139,7 @@ final class MenuBarPanelManager: NSObject {
         let side = pixelSideLength
         graphicsContext.saveGState()
         graphicsContext.translateBy(x: side / 2, y: side / 2)
+        graphicsContext.scaleBy(x: -1, y: 1)
         graphicsContext.rotate(by: -CGFloat.pi / 4)
         let rotationInsetScale: CGFloat = 0.76
         graphicsContext.scaleBy(x: rotationInsetScale, y: rotationInsetScale)

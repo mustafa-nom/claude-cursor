@@ -56,6 +56,12 @@ final class PatternDatabase {
         // Enable WAL mode for better concurrent read performance
         executeStatement("PRAGMA journal_mode=WAL")
 
+        // Enforce FOREIGN KEY constraints declared in DDL. SQLite ships
+        // with this disabled by default — without this pragma the FKs in
+        // chat_session_segment_turns would be documentation-only and a
+        // segment deletion would leave orphan turn rows behind.
+        executeStatement("PRAGMA foreign_keys = ON")
+
         let tablesCreatedSuccessfully = createTablesIfNeeded()
         if tablesCreatedSuccessfully {
             print("📊 PatternDatabase: opened at \(databasePath)")
@@ -354,6 +360,228 @@ final class PatternDatabase {
         return (successes: successes, failures: failures)
     }
 
+    // MARK: - Chat Session Segments
+
+    /// Inserts a single chat-session segment row. Called by the segmenter
+    /// right after a session ends (or by the backfill runner on first launch)
+    /// with a heuristic `taskName`. A later batched-rename pass updates the
+    /// name via `updateSegmentTaskName` once Claude responds.
+    func insertChatSessionSegment(
+        segmentID: String,
+        parentSessionID: String,
+        appName: String,
+        bundleIdentifier: String,
+        browserHostname: String?,
+        browserToolName: String?,
+        taskName: String,
+        taskNameSource: String,
+        startedAt: String,
+        endedAt: String,
+        turnCount: Int,
+        transcriptPath: String,
+        turnRangeStart: Int,
+        turnRangeEnd: Int
+    ) {
+        let sql = """
+            INSERT INTO chat_session_segments
+                (segment_id, parent_session_id, app_name, bundle_identifier,
+                 browser_hostname, browser_tool_name, task_name, task_name_source,
+                 started_at, ended_at, turn_count, transcript_path,
+                 turn_range_start, turn_range_end)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+
+        executeParameterizedStatement(sql) { statement in
+            sqlite3_bind_text(statement, 1, (segmentID as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 2, (parentSessionID as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 3, (appName as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 4, (bundleIdentifier as NSString).utf8String, -1, nil)
+            if let browserHostname {
+                sqlite3_bind_text(statement, 5, (browserHostname as NSString).utf8String, -1, nil)
+            } else {
+                sqlite3_bind_null(statement, 5)
+            }
+            if let browserToolName {
+                sqlite3_bind_text(statement, 6, (browserToolName as NSString).utf8String, -1, nil)
+            } else {
+                sqlite3_bind_null(statement, 6)
+            }
+            sqlite3_bind_text(statement, 7, (taskName as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 8, (taskNameSource as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 9, (startedAt as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 10, (endedAt as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(statement, 11, Int32(turnCount))
+            sqlite3_bind_text(statement, 12, (transcriptPath as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(statement, 13, Int32(turnRangeStart))
+            sqlite3_bind_int(statement, 14, Int32(turnRangeEnd))
+        }
+    }
+
+    /// Inserts all turns for a segment in a single transaction so the sidebar
+    /// can render a past segment with one SELECT rather than re-parsing the
+    /// raw markdown file. Uses BEGIN/COMMIT because SQLite's per-row autocommit
+    /// becomes very slow with many turns.
+    func insertSegmentTurns(segmentID: String, turns: [SegmentTurnInput]) {
+        guard !turns.isEmpty else { return }
+
+        executeStatement("BEGIN TRANSACTION")
+
+        let sql = """
+            INSERT INTO chat_session_segment_turns
+                (segment_id, turn_index, timestamp, user_text, assistant_text)
+            VALUES (?, ?, ?, ?, ?)
+            """
+
+        for turn in turns {
+            executeParameterizedStatement(sql) { statement in
+                sqlite3_bind_text(statement, 1, (segmentID as NSString).utf8String, -1, nil)
+                sqlite3_bind_int(statement, 2, Int32(turn.turnIndex))
+                sqlite3_bind_text(statement, 3, (turn.timestamp as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(statement, 4, (turn.userText as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(statement, 5, (turn.assistantText as NSString).utf8String, -1, nil)
+            }
+        }
+
+        executeStatement("COMMIT")
+    }
+
+    /// Updates the display name for a segment after the async batched Claude
+    /// rename completes. `source` should be "llm" once the model-derived title
+    /// has landed; "heuristic" if we're retrying after an earlier failure.
+    func updateSegmentTaskName(segmentID: String, taskName: String, source: String) {
+        let sql = """
+            UPDATE chat_session_segments
+            SET task_name = ?, task_name_source = ?
+            WHERE segment_id = ?
+            """
+
+        executeParameterizedStatement(sql) { statement in
+            sqlite3_bind_text(statement, 1, (taskName as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 2, (source as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 3, (segmentID as NSString).utf8String, -1, nil)
+        }
+    }
+
+    /// Lists all segments from the last N days, newest first. The sidebar
+    /// model groups these into date-bucketed + app/tool-folder sections in
+    /// Swift rather than relying on SQL grouping so the UI logic stays in
+    /// one place.
+    func listChatSessionSegments(sinceDaysAgo: Int) -> [ChatSessionSegmentRecord] {
+        let sql = """
+            SELECT segment_id, parent_session_id, app_name, bundle_identifier,
+                   browser_hostname, browser_tool_name, task_name, task_name_source,
+                   started_at, ended_at, turn_count, transcript_path,
+                   turn_range_start, turn_range_end
+            FROM chat_session_segments
+            WHERE started_at >= datetime('now', ?)
+            ORDER BY started_at DESC
+            """
+
+        var segments: [ChatSessionSegmentRecord] = []
+        let negativeDaysInterval = "-\(sinceDaysAgo) days"
+
+        queryWithParameters(sql, bindings: { statement in
+            sqlite3_bind_text(statement, 1, (negativeDaysInterval as NSString).utf8String, -1, nil)
+        }) { statement in
+            segments.append(makeSegmentRecord(from: statement))
+        }
+
+        return segments
+    }
+
+    /// Returns every persisted turn for a segment in ascending turn-index order.
+    func listSegmentTurns(segmentID: String) -> [SegmentTurnRecord] {
+        let sql = """
+            SELECT turn_index, timestamp, user_text, assistant_text
+            FROM chat_session_segment_turns
+            WHERE segment_id = ?
+            ORDER BY turn_index ASC
+            """
+
+        var turns: [SegmentTurnRecord] = []
+
+        queryWithParameters(sql, bindings: { statement in
+            sqlite3_bind_text(statement, 1, (segmentID as NSString).utf8String, -1, nil)
+        }) { statement in
+            turns.append(SegmentTurnRecord(
+                turnIndex: Int(sqlite3_column_int(statement, 0)),
+                timestamp: columnText(statement, index: 1),
+                userText: columnText(statement, index: 2),
+                assistantText: columnText(statement, index: 3)
+            ))
+        }
+
+        return turns
+    }
+
+    /// Searches segments whose task name OR any user-turn text contains `query`.
+    /// DISTINCT is required because the JOIN with segment_turns can produce
+    /// duplicate rows when multiple turns in the same segment match.
+    func searchChatSessionSegments(query: String, limit: Int) -> [ChatSessionSegmentRecord] {
+        let wildcardQuery = "%\(query)%"
+        let sql = """
+            SELECT DISTINCT s.segment_id, s.parent_session_id, s.app_name, s.bundle_identifier,
+                   s.browser_hostname, s.browser_tool_name, s.task_name, s.task_name_source,
+                   s.started_at, s.ended_at, s.turn_count, s.transcript_path,
+                   s.turn_range_start, s.turn_range_end
+            FROM chat_session_segments s
+            LEFT JOIN chat_session_segment_turns t ON t.segment_id = s.segment_id
+            WHERE s.task_name LIKE ? OR t.user_text LIKE ?
+            ORDER BY s.started_at DESC
+            LIMIT ?
+            """
+
+        var segments: [ChatSessionSegmentRecord] = []
+
+        queryWithParameters(sql, bindings: { statement in
+            sqlite3_bind_text(statement, 1, (wildcardQuery as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 2, (wildcardQuery as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(statement, 3, Int32(limit))
+        }) { statement in
+            segments.append(makeSegmentRecord(from: statement))
+        }
+
+        return segments
+    }
+
+    /// Returns the set of `parent_session_id` values already represented in
+    /// the segments table. The backfill runner uses this to skip session
+    /// logs that have already been processed, keeping it idempotent across
+    /// partial runs (e.g. app quit mid-backfill).
+    func distinctParentSessionIDs() -> Set<String> {
+        let sql = "SELECT DISTINCT parent_session_id FROM chat_session_segments"
+        var parentSessionIDs: Set<String> = []
+        queryWithParameters(sql, bindings: { _ in }) { statement in
+            parentSessionIDs.insert(columnText(statement, index: 0))
+        }
+        return parentSessionIDs
+    }
+
+    /// Shared row-decoding helper for both `listChatSessionSegments` and
+    /// `searchChatSessionSegments`. Column order must match the SELECT lists
+    /// in those queries.
+    private func makeSegmentRecord(from statement: OpaquePointer) -> ChatSessionSegmentRecord {
+        let rawBrowserHostname = sqlite3_column_text(statement, 4).map { String(cString: $0) }
+        let rawBrowserToolName = sqlite3_column_text(statement, 5).map { String(cString: $0) }
+
+        return ChatSessionSegmentRecord(
+            segmentID: columnText(statement, index: 0),
+            parentSessionID: columnText(statement, index: 1),
+            appName: columnText(statement, index: 2),
+            bundleIdentifier: columnText(statement, index: 3),
+            browserHostname: rawBrowserHostname,
+            browserToolName: rawBrowserToolName,
+            taskName: columnText(statement, index: 6),
+            taskNameSource: columnText(statement, index: 7),
+            startedAt: columnText(statement, index: 8),
+            endedAt: columnText(statement, index: 9),
+            turnCount: Int(sqlite3_column_int(statement, 10)),
+            transcriptPath: columnText(statement, index: 11),
+            turnRangeStart: Int(sqlite3_column_int(statement, 12)),
+            turnRangeEnd: Int(sqlite3_column_int(statement, 13))
+        )
+    }
+
     // MARK: - Private: Table Creation
 
     private func createTablesIfNeeded() -> Bool {
@@ -414,6 +642,57 @@ final class PatternDatabase {
                 summary_line TEXT,
                 recorded_at TEXT DEFAULT (datetime('now'))
             )
+            """,
+            // One row per app-context segment of a session.
+            // A single session whose conversation moved from VS Code → Figma → Linear
+            // becomes three rows here. `browser_hostname` stores only the hostname
+            // (e.g. "linear.app") — never the full URL, which can carry tokens or
+            // search queries. `task_name_source` is 'heuristic' right after insert
+            // and flips to 'llm' once the batched Claude rename finishes.
+            """
+            CREATE TABLE IF NOT EXISTS chat_session_segments (
+                segment_id          TEXT PRIMARY KEY,
+                parent_session_id   TEXT NOT NULL,
+                app_name            TEXT NOT NULL,
+                bundle_identifier   TEXT NOT NULL,
+                browser_hostname    TEXT,
+                browser_tool_name   TEXT,
+                task_name           TEXT NOT NULL DEFAULT '',
+                task_name_source    TEXT NOT NULL DEFAULT 'heuristic',
+                started_at          TEXT NOT NULL,
+                ended_at            TEXT NOT NULL,
+                turn_count          INTEGER NOT NULL DEFAULT 0,
+                transcript_path     TEXT NOT NULL,
+                turn_range_start    INTEGER NOT NULL,
+                turn_range_end      INTEGER NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_segments_bundle
+                ON chat_session_segments(bundle_identifier, started_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_segments_started
+                ON chat_session_segments(started_at DESC)
+            """,
+            // Denormalized turns for fast sidebar click-to-render. The same
+            // turns are also in the raw session markdown; duplication is
+            // intentional to keep sub-ms reads for the sidebar.
+            """
+            CREATE TABLE IF NOT EXISTS chat_session_segment_turns (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                segment_id      TEXT NOT NULL,
+                turn_index      INTEGER NOT NULL,
+                timestamp       TEXT NOT NULL,
+                user_text       TEXT NOT NULL,
+                assistant_text  TEXT NOT NULL,
+                FOREIGN KEY(segment_id) REFERENCES chat_session_segments(segment_id)
+                    ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_segment_turns
+                ON chat_session_segment_turns(segment_id, turn_index)
             """
         ]
 
@@ -540,6 +819,71 @@ struct SessionRecord {
 
     /// Whether this session has been explicitly ended.
     var hasEnded: Bool { !endedAt.isEmpty }
+}
+
+/// One sidebar-visible chat session segment. A single live session whose
+/// conversation moved between apps becomes multiple `ChatSessionSegmentRecord`
+/// rows — one per `(bundleIdentifier, browserToolName)` group after the
+/// sandwich-merge pass in `ChatSessionSegmenter`.
+struct ChatSessionSegmentRecord: Identifiable {
+    let segmentID: String
+    let parentSessionID: String
+    let appName: String
+    let bundleIdentifier: String
+
+    /// Hostname of the active browser tab when this segment was captured
+    /// (e.g. "linear.app"). Nil for native apps. Full URL is NEVER persisted
+    /// to protect tokens / search queries that may appear in query strings.
+    let browserHostname: String?
+
+    /// Human-friendly tool name derived from the hostname (e.g. "Linear").
+    /// Nil for native apps or for hostnames that didn't map cleanly.
+    let browserToolName: String?
+
+    /// Display title for the sidebar row. Always populated — "heuristic"
+    /// right after insert, upgraded to "llm" by the batched rename pass.
+    let taskName: String
+
+    /// "heuristic" or "llm". Used by the UI to show a subtle indicator
+    /// while the LLM-derived title is still pending, and by the backfill
+    /// retry logic to find rows that haven't successfully been renamed.
+    let taskNameSource: String
+
+    let startedAt: String
+    let endedAt: String
+    let turnCount: Int
+
+    /// Absolute path to the raw session_*.md file this segment was derived
+    /// from. Preserved so the segmenter / backfill can re-parse if needed.
+    let transcriptPath: String
+
+    /// Inclusive turn-index range within the parent session that this
+    /// segment covers. Useful for debugging and for "continue this session"
+    /// resumption (out of scope for v1 but plumbed through).
+    let turnRangeStart: Int
+    let turnRangeEnd: Int
+
+    /// `Identifiable` conformance for SwiftUI `ForEach` / selection.
+    var id: String { segmentID }
+}
+
+/// A single turn stored on disk against a segment. Columns mirror the
+/// `chat_session_segment_turns` schema.
+struct SegmentTurnRecord {
+    let turnIndex: Int
+    let timestamp: String
+    let userText: String
+    let assistantText: String
+}
+
+/// Input shape for the bulk-insert path in `insertSegmentTurns`. A value
+/// type (not a DB record) so segmenter / backfill code can build it without
+/// worrying about auto-incremented row IDs.
+struct SegmentTurnInput {
+    let turnIndex: Int
+    let timestamp: String
+    let userText: String
+    let assistantText: String
 }
 
 // MARK: - Confidence Decay

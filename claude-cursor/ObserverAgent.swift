@@ -28,6 +28,25 @@ struct ObservedSessionTurn {
     let userUtterance: String
     let assistantResponse: String
     let frontmostAppName: String
+
+    /// Bundle identifier of the frontmost app at the time of the turn. Used
+    /// by the chat session segmenter to group consecutive turns into per-app
+    /// sidebar entries. Empty string when the frontmost app can't be
+    /// resolved (e.g. Finder transitions); legacy session files parsed back
+    /// also surface as empty.
+    let frontmostBundleIdentifier: String
+
+    /// Hostname of the active tab when the frontmost app is an allowlisted
+    /// Chromium-family browser. Nil for native apps and for browser turns
+    /// where the URL extraction timed out or was denied. Full URL is NEVER
+    /// persisted — only the hostname — so tokens / search queries in URL
+    /// query strings don't land on disk.
+    let browserHostname: String?
+
+    /// Human-friendly tool name derived from `browserHostname` (e.g.
+    /// "Linear", "Figma"). Feeds the sidebar sub-folder label.
+    let browserToolName: String?
+
     let outputModeUsed: String  // "navigation" | "answer" | "lesson" | "chat" | ""
 }
 
@@ -58,7 +77,11 @@ final class ObserverAgent {
     /// Last path component of `sessionLogFileURL` — single source of truth for
     /// UserDefaults cold-start recap and any code that must reopen this file.
     private(set) var sessionLogFilename: String
-    private let sessionLogFileURL: URL
+    /// Absolute URL of this session's raw markdown log. Exposed so the chat
+    /// session segmenter and backfill runner can re-parse the file on end —
+    /// the observer's in-memory ring buffer is capped at 50 turns and would
+    /// lose data for long sessions.
+    let sessionLogFileURL: URL
 
     /// In-memory ring buffer of recent turns — used by SessionCompressor on
     /// session end. The on-disk log has the full history; this buffer avoids
@@ -115,10 +138,18 @@ final class ObserverAgent {
     /// and keeps a copy in memory for faster compressor access at session end.
     /// PII stripping is applied before either write path so neither the on-
     /// disk log nor the compressor sees raw credit card numbers, SSNs, etc.
+    ///
+    /// `frontmostBundleIdentifier`, `browserHostname`, and `browserToolName`
+    /// are all separately persisted so the chat session segmenter can group
+    /// sidebar entries by `(bundleIdentifier, browserToolName)` without
+    /// having to re-derive identity from the display name.
     func observeTurn(
         userUtterance: String,
         assistantResponse: String,
         frontmostAppName: String,
+        frontmostBundleIdentifier: String,
+        browserHostname: String?,
+        browserToolName: String?,
         outputModeUsed: String
     ) {
         let isoFormatter = ISO8601DateFormatter()
@@ -133,6 +164,9 @@ final class ObserverAgent {
             userUtterance: strippedUserUtterance,
             assistantResponse: strippedAssistantResponse,
             frontmostAppName: frontmostAppName,
+            frontmostBundleIdentifier: frontmostBundleIdentifier,
+            browserHostname: browserHostname,
+            browserToolName: browserToolName,
             outputModeUsed: outputModeUsed
         )
 
@@ -209,9 +243,21 @@ final class ObserverAgent {
     }
 
     private func appendTurnToSessionFile(turn: ObservedSessionTurn) {
+        // New pipe-separated header carries 4 fields inside the bracket so
+        // `ChatSessionLogParser` can reconstruct full per-turn app context.
+        // "-" is written for missing browser fields so the parse regex
+        // always sees exactly 4 pipe-separated values.
+        let browserHostnameField = turn.browserHostname?.isEmpty == false
+            ? turn.browserHostname!
+            : "-"
+        let browserToolField = turn.browserToolName?.isEmpty == false
+            ? turn.browserToolName!
+            : "-"
+        let outputModeField = turn.outputModeUsed.isEmpty ? "n/a" : turn.outputModeUsed
+
         let turnBlock = """
 
-        ### \(turn.timestampISO8601) [\(turn.frontmostAppName)] (\(turn.outputModeUsed.isEmpty ? "n/a" : turn.outputModeUsed))
+        ### \(turn.timestampISO8601) [\(turn.frontmostAppName)|\(turn.frontmostBundleIdentifier)|\(browserHostnameField)|\(browserToolField)] (\(outputModeField))
 
         **User:** \(turn.userUtterance)
 

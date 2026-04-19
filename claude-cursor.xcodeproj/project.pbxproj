@@ -39,8 +39,8 @@
 		B78D618F2F9022D300B230E1 /* Exceptions for "claude-cursor" folder in "claude-cursor" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				Info.plist,
 				ff.mp3,
+				Info.plist,
 			);
 			target = 28F22CBE2F56440300A0FC59 /* claude-cursor */;
 		};

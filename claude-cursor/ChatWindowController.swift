@@ -2,13 +2,23 @@
 //  ChatWindowController.swift
 //  claude-cursor
 //
-//  Floating NSPanel that displays the conversation transcript and provides
-//  a text input field for typed messages. Text messages go through the same
-//  pipeline as voice (screenshot capture + wiki context + Claude API), so
-//  the user gets identical behavior whether they type or talk.
+//  Floating NSPanel that hosts the chat window. The chat window is now a
+//  2-pane surface:
 //
-//  Toggled by the "Show chat" toggle in the menu bar panel. Non-activating
-//  so it doesn't steal focus from the user's current app.
+//      ┌───────────┬──────────────────────────────┐
+//      │  Sidebar  │  Detail (live OR past)       │
+//      │   220pt   │          420pt min           │
+//      └───────────┴──────────────────────────────┘
+//
+//  Left pane: `ChatSidebarView` — past chats grouped by date + app, plus
+//  "+ New Chat" and search. Right pane switches based on the sidebar's
+//  `currentSelection`:
+//    - `.liveCurrent` → `ChatLiveTranscriptView` (the original transcript
+//      + text input; routes through the same voice pipeline as before).
+//    - `.segment(id)` → `ReadOnlySegmentTranscriptView` (past turns, no
+//      input).
+//
+//  Non-activating so it doesn't steal focus from the user's current app.
 //
 
 import AppKit
@@ -25,9 +35,9 @@ final class ChatWindowController {
     private var chatPanelCloseDelegate: ChatPanelDelegate?
     private weak var companionManager: CompanionManager?
     /// Initial size when the panel is first created; user resize is preserved across hide/show.
-    private let defaultPanelWidth: CGFloat = 360
+    private let defaultPanelWidth: CGFloat = 640
     private let defaultPanelHeight: CGFloat = 520
-    private let minimumPanelWidth: CGFloat = 328
+    private let minimumPanelWidth: CGFloat = 560
     private let minimumPanelHeight: CGFloat = 440
 
     init(companionManager: CompanionManager) {
@@ -61,10 +71,18 @@ final class ChatWindowController {
     private func createChatPanel() {
         guard let companionManager else { return }
 
-        let chatView = ChatTranscriptView(companionManager: companionManager)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        let sidebarModel = ChatSidebarModel(
+            patternDatabase: companionManager.patternDatabase,
+            chatSessionBackfillRunner: companionManager.chatSessionBackfillRunner
+        )
 
-        let hostingView = NSHostingView(rootView: chatView)
+        let chatRootView = ChatWindowRootView(
+            companionManager: companionManager,
+            sidebarModel: sidebarModel
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        let hostingView = NSHostingView(rootView: chatRootView)
         hostingView.autoresizingMask = [.width, .height]
 
         let panel = NSPanel(
@@ -147,11 +165,88 @@ private class ChatPanelDelegate: NSObject, NSWindowDelegate {
     }
 }
 
-// MARK: - Chat Transcript View
+// MARK: - Root Split View
 
-/// SwiftUI view for the chat transcript + text input field, hosted inside
-/// the floating NSPanel.
-struct ChatTranscriptView: View {
+/// Top-level SwiftUI view hosted inside the chat NSPanel. Owns the HStack
+/// layout (sidebar + divider + detail) and drives which detail view is
+/// shown based on `sidebarModel.currentSelection`.
+struct ChatWindowRootView: View {
+    @ObservedObject var companionManager: CompanionManager
+    @ObservedObject var sidebarModel: ChatSidebarModel
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ChatSidebarView(
+                sidebarModel: sidebarModel,
+                onNewChatRequested: {
+                    Task { @MainActor in
+                        await companionManager.endCurrentChatSessionExplicitly()
+                        sidebarModel.currentSelection = .liveCurrent
+                    }
+                }
+            )
+
+            Divider()
+                .background(DS.Colors.borderSubtle.opacity(0.4))
+
+            rightDetailPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(DS.Colors.surface1)
+    }
+
+    @ViewBuilder
+    private var rightDetailPane: some View {
+        switch sidebarModel.currentSelection {
+        case .liveCurrent:
+            ChatLiveTranscriptView(companionManager: companionManager)
+        case .segment(let segmentID):
+            ReadOnlySegmentTranscriptView(
+                segmentID: segmentID,
+                taskName: resolvedTaskName(forSegmentID: segmentID),
+                patternDatabase: companionManager.patternDatabase,
+                onRequestReturnToLiveChat: {
+                    sidebarModel.currentSelection = .liveCurrent
+                }
+            )
+        }
+    }
+
+    /// Looks up the sidebar row task name for the given segment without
+    /// re-querying the database — scans the already-fetched tree. Falls
+    /// back to "Past chat" if the row isn't in the current window (e.g.
+    /// older than the 60-day fetch).
+    private func resolvedTaskName(forSegmentID segmentID: String) -> String {
+        for section in sidebarModel.dateSectionsForSidebarTree {
+            for appFolder in section.appFoldersInOrder {
+                switch appFolder.leafContents {
+                case .directSegments(let rows):
+                    if let match = rows.first(where: { $0.segmentID == segmentID }) {
+                        return match.displayTaskName
+                    }
+                case .browserToolSubfolders(let subfolders):
+                    for subfolder in subfolders {
+                        if let match = subfolder.segmentsInOrder.first(where: { $0.segmentID == segmentID }) {
+                            return match.displayTaskName
+                        }
+                    }
+                }
+            }
+        }
+        if let match = sidebarModel.flatSearchResults.first(where: { $0.segmentID == segmentID }) {
+            return match.displayTaskName
+        }
+        return "Past chat"
+    }
+}
+
+// MARK: - Live Transcript View
+
+/// Live chat transcript + text input. Lifted from the old
+/// `ChatTranscriptView` with no behavior changes — typed messages still
+/// route through `companionManager.sendTextMessage` which takes the same
+/// screenshot + wiki-context + Claude API path as voice.
+struct ChatLiveTranscriptView: View {
     @ObservedObject var companionManager: CompanionManager
     @State private var textInputContent: String = ""
     @State private var isTextInputFocused: Bool = false
@@ -165,9 +260,15 @@ struct ChatTranscriptView: View {
                         if companionManager.conversationHistory.isEmpty {
                             emptyStateView
                         } else {
+                            // `id: \.element.id` is load-bearing: trimming
+                            // the oldest exchange shifts every enumerated
+                            // offset down by one, which caused `id: \.offset`
+                            // to re-identify every surviving bubble and re-
+                            // animate it. The stable per-turn UUID keeps
+                            // identity across trims.
                             ForEach(
                                 Array(companionManager.conversationHistory.enumerated()),
-                                id: \.offset
+                                id: \.element.id
                             ) { index, entry in
                                 ChatMessageBubble(
                                     role: .user,

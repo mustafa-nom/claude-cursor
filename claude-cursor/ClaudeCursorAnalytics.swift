@@ -118,4 +118,24 @@ enum ClaudeCursorAnalytics {
             "error": error
         ])
     }
+
+    // MARK: - Browser Tab URL Extraction
+
+    /// Accessibility read for the active browser tab URL exceeded the
+    /// 150ms hard timeout. Surfaces apps whose AX tree has drifted from
+    /// the assumed `AXAddressField` subrole or that are wedged.
+    static func trackBrowserURLExtractionTimeout(bundleIdentifier: String) {
+        PostHogSDK.shared.capture("browser_url_extraction_timeout", properties: [
+            "bundle_id": bundleIdentifier
+        ])
+    }
+
+    /// Accessibility traversal returned nil without timing out — no
+    /// address-field subrole found in the focused window. Indicates the
+    /// target browser has shipped an AX-tree change we haven't adapted to.
+    static func trackBrowserURLExtractionFailed(bundleIdentifier: String) {
+        PostHogSDK.shared.capture("browser_url_extraction_failed", properties: [
+            "bundle_id": bundleIdentifier
+        ])
+    }
 }

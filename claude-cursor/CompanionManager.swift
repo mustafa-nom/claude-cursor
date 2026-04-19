@@ -21,6 +21,47 @@ enum CompanionVoiceState {
     case responding
 }
 
+/// One turn of the live conversation. Captures both the text both sides
+/// exchanged and the per-turn app context the chat-sessions sidebar uses
+/// to split a mixed-app session into per-app sidebar entries.
+///
+/// Field naming (`userTranscript` / `assistantResponse`) matches the
+/// previous tuple layout so `ChatTranscriptView` stays source-compatible.
+struct ChatTurnRecord: Identifiable {
+    /// Stable identity for SwiftUI `ForEach` + selection. Required because
+    /// we trim the 10-oldest entries when the history grows — positional
+    /// indices would collide after a trim.
+    let id: UUID = UUID()
+    let timestamp: Date
+    let userTranscript: String
+    let assistantResponse: String
+
+    /// Localized app name of the frontmost app at turn time (e.g. "Google
+    /// Chrome"). Used as the top-level sidebar folder label.
+    let frontmostAppName: String
+
+    /// Bundle identifier of the frontmost app — the stable identity the
+    /// segmenter groups on. Empty when the frontmost app couldn't be
+    /// resolved (rare: transient Finder focus).
+    let frontmostBundleIdentifier: String
+
+    /// Hostname of the active browser tab — persisted field, e.g.
+    /// "linear.app". Nil for native apps and for browser turns where AX
+    /// extraction was denied or timed out.
+    let browserHostname: String?
+
+    /// Human-friendly tool name derived from the hostname ("Linear",
+    /// "Figma") for the sidebar sub-folder label. Nil when no tool map
+    /// fallback could produce a clean name.
+    let browserToolName: String?
+
+    /// Full URL of the active browser tab. Kept ONLY in memory — never
+    /// persisted to SQLite or session markdown, because URL query strings
+    /// can carry session tokens, search queries, and other short-lived
+    /// secrets the user would not expect to land on disk.
+    let browserTabURLInMemoryOnly: String?
+}
+
 /// Pure helper so end-of-turn TTS does not repeat the explainer overview already spoken in parallel.
 enum ExplainerSpokenTextDedup {
     static func remainingAssistantTextAfterOverviewIfRedundant(
@@ -232,9 +273,11 @@ final class CompanionManager: ObservableObject {
     }()
 
     /// Conversation history so Claude remembers prior exchanges within a session.
-    /// Each entry is the user's transcript and Claude's response. Published so
-    /// the chat transcript view can display the full conversation.
-    @Published private(set) var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
+    /// Each entry is one turn — the user's transcript, Claude's response,
+    /// and the per-turn app context the chat sessions sidebar uses to split
+    /// a mixed-app session into per-app entries. Published so the chat
+    /// transcript view can display the full conversation.
+    @Published private(set) var conversationHistory: [ChatTurnRecord] = []
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -404,6 +447,7 @@ final class CompanionManager: ObservableObject {
         // Initialize the wiki directory structure so page reads and context
         // bundle lookups during tutor observations don't race with setup.
         wikiManager.initializeIfNeeded()
+
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
@@ -429,6 +473,14 @@ final class CompanionManager: ObservableObject {
         // failure (missing file, Claude error) simply leaves the recap nil.
         Task { [weak self] in
             await self?.generateColdStartRecapIfEligible()
+        }
+
+        // One-shot backfill on first launch post-ship: retro-file existing
+        // session_*.md files into the new chat segments table. Gated by a
+        // UserDefaults version key, so subsequent launches no-op quickly.
+        Task.detached(priority: .background) { [weak self] in
+            guard let self else { return }
+            await self.chatSessionBackfillRunner.runIfNeededForFirstLaunchBackfill()
         }
 
         // Wire the Escape kill switch for automation sequences. The
@@ -853,6 +905,29 @@ final class CompanionManager: ObservableObject {
     /// on first use since the chat panel may never be opened.
     private(set) lazy var chatWindowController: ChatWindowController = {
         ChatWindowController(companionManager: self)
+    }()
+
+    // MARK: - Chat Session Segmenter / Backfill
+
+    /// Splits a finished session into per-app sidebar entries. Shared by
+    /// the explicit "+ New Chat" path and the auto-end fallbacks. Built
+    /// lazily so apps that never open the chat window don't pay for it.
+    private(set) lazy var chatSessionSegmenter: ChatSessionSegmenter = {
+        ChatSessionSegmenter(
+            patternDatabase: patternDatabase,
+            claudeAPI: claudeAPI
+        )
+    }()
+
+    /// Retro-files the existing on-disk `session_*.md` logs into the new
+    /// chat segments table on first launch. The runner itself is
+    /// idempotent, so it's safe to instantiate eagerly.
+    private(set) lazy var chatSessionBackfillRunner: ChatSessionBackfillRunner = {
+        ChatSessionBackfillRunner(
+            wikiManager: wikiManager,
+            patternDatabase: patternDatabase,
+            chatSessionSegmenter: chatSessionSegmenter
+        )
     }()
 
     // MARK: - Answer Panel
@@ -1762,32 +1837,22 @@ final class CompanionManager: ObservableObject {
                     )
                 }
 
-                // Save this exchange to conversation history so future
-                // turns have full context.
-                conversationHistory.append((
-                    userTranscript: transcript,
-                    assistantResponse: assistantTextForUserFacingArtifacts
-                ))
-
-                // Keep only the last 10 exchanges to avoid unbounded context growth
-                if conversationHistory.count > 10 {
-                    conversationHistory.removeFirst(conversationHistory.count - 10)
-                }
-
-                print("🧠 Conversation history: \(conversationHistory.count) exchanges")
-
                 ClaudeCursorAnalytics.trackAIResponseReceived(
                     response: assistantTextForUserFacingArtifacts
                 )
 
                 // Record this turn in the session observer — captured after
                 // routing so the log reflects which surface rendered the
-                // response. PII stripping happens inside the observer.
+                // response. `recordObservedTurn` also appends a
+                // `ChatTurnRecord` to `conversationHistory` (capped at 10)
+                // stamped with the frontmost-app + browser context used by
+                // the chat-sessions sidebar.
                 recordObservedTurn(
                     userTranscript: transcript,
                     assistantResponse: assistantTextForUserFacingArtifacts,
                     outputModeUsed: "\(chosenOutputSurface)"
                 )
+                print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
                 // Proactive mode: after a navigation response with a
                 // pointing coordinate, watch the screen so we can speak
@@ -2374,19 +2439,11 @@ final class CompanionManager: ObservableObject {
                 ClipboardManager.copyResponseToClipboard(rawResponseText: spokenText)
             }
 
-            conversationHistory.append((
-                userTranscript: "[tutor observation]",
-                assistantResponse: spokenText
-            ))
-
-            if conversationHistory.count > 10 {
-                conversationHistory.removeFirst(conversationHistory.count - 10)
-            }
-
-            // Tutor observations flow into the session log too so the
-            // compressor has full context at session end. The user
-            // utterance is the synthetic "[tutor observation]" marker
-            // since the tutor isn't responding to a live prompt.
+            // Tutor observations flow into the session log and the live
+            // `conversationHistory` via `recordObservedTurn` (handles
+            // append + trim + observer write). The user utterance is the
+            // synthetic "[tutor observation]" marker since the tutor
+            // isn't responding to a live prompt.
             recordObservedTurn(
                 userTranscript: "[tutor observation]",
                 assistantResponse: spokenText,
@@ -2588,13 +2645,24 @@ final class CompanionManager: ObservableObject {
             // pointing targets were already published by the tool executor.
             pendingNavigationAssistantResponse = spokenText
 
-            conversationHistory.append((
+            // Auto follow-ups from the pending-navigation observer don't
+            // go through `recordObservedTurn` (they aren't a direct
+            // response to a user prompt), but they should still appear in
+            // `conversationHistory` stamped with the frontmost-app context
+            // so the chat sessions sidebar groups them with the preceding
+            // turns rather than treating them as app-less singletons.
+            let autoFollowUpContext = captureFrontmostAppContextForChatTurn()
+            let autoFollowUpTurn = ChatTurnRecord(
+                timestamp: Date(),
                 userTranscript: "[auto-follow-up]",
-                assistantResponse: spokenText
-            ))
-            if conversationHistory.count > 10 {
-                conversationHistory.removeFirst(conversationHistory.count - 10)
-            }
+                assistantResponse: spokenText,
+                frontmostAppName: autoFollowUpContext.frontmostAppName,
+                frontmostBundleIdentifier: autoFollowUpContext.frontmostBundleIdentifier,
+                browserHostname: autoFollowUpContext.browserHostname,
+                browserToolName: autoFollowUpContext.browserToolName,
+                browserTabURLInMemoryOnly: autoFollowUpContext.browserTabURL
+            )
+            appendChatTurnAndTrimHistory(autoFollowUpTurn)
 
             voiceState = .responding
             do {
@@ -2713,6 +2781,11 @@ final class CompanionManager: ObservableObject {
     /// interaction (not app launch). The observer writes to disk and keeps
     /// an in-memory copy for later compression.
     ///
+    /// Also appends the turn to `conversationHistory` (capped at 10) and
+    /// stamps it with the frontmost app + browser context at the moment
+    /// the turn landed — the chat sessions sidebar reads those fields to
+    /// split a mixed-app session into per-app entries on session end.
+    ///
     /// Callers should provide the router's chosen output mode so the session
     /// log captures which surface rendered each response — useful signal for
     /// the compressor and for future queries.
@@ -2732,11 +2805,27 @@ final class CompanionManager: ObservableObject {
         currentSessionObserverAgent = observer
         lastSessionInteractionTimestamp = Date()
 
-        let frontmostAppName = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+        let capturedContext = captureFrontmostAppContextForChatTurn()
+
+        let turnRecord = ChatTurnRecord(
+            timestamp: Date(),
+            userTranscript: userTranscript,
+            assistantResponse: assistantResponse,
+            frontmostAppName: capturedContext.frontmostAppName,
+            frontmostBundleIdentifier: capturedContext.frontmostBundleIdentifier,
+            browserHostname: capturedContext.browserHostname,
+            browserToolName: capturedContext.browserToolName,
+            browserTabURLInMemoryOnly: capturedContext.browserTabURL
+        )
+        appendChatTurnAndTrimHistory(turnRecord)
+
         observer.observeTurn(
             userUtterance: userTranscript,
             assistantResponse: assistantResponse,
-            frontmostAppName: frontmostAppName,
+            frontmostAppName: capturedContext.frontmostAppName,
+            frontmostBundleIdentifier: capturedContext.frontmostBundleIdentifier,
+            browserHostname: capturedContext.browserHostname,
+            browserToolName: capturedContext.browserToolName,
             outputModeUsed: outputModeUsed
         )
 
@@ -2745,6 +2834,66 @@ final class CompanionManager: ObservableObject {
         }
 
         autoResearchFrontmostAppIfUnknown()
+    }
+
+    /// Captures everything we need about the frontmost app + browser tab
+    /// for one chat turn. Wrapped in a value so the same snapshot is used
+    /// for both the on-disk observer log and the in-memory
+    /// `conversationHistory` record, and so future additions (e.g. window
+    /// title) don't require threading yet another parameter through.
+    struct CapturedChatTurnContext {
+        let frontmostAppName: String
+        let frontmostBundleIdentifier: String
+        let browserHostname: String?
+        let browserToolName: String?
+        /// Full URL — NEVER persisted. Passed through so the chat transcript
+        /// can render link previews while the turn is still "live".
+        let browserTabURL: String?
+    }
+
+    /// Snapshots the frontmost app at call time and, for allowlisted
+    /// Chromium-family browsers, best-effort extracts the active tab URL
+    /// and derives a hostname + tool name. Returns empty fields instead of
+    /// throwing so the chat pipeline continues even when AX is denied.
+    private func captureFrontmostAppContextForChatTurn() -> CapturedChatTurnContext {
+        let frontmostApplication = NSWorkspace.shared.frontmostApplication
+        let appName = frontmostApplication?.localizedName ?? ""
+        let bundleIdentifier = frontmostApplication?.bundleIdentifier ?? ""
+        let processIdentifier = frontmostApplication?.processIdentifier ?? 0
+
+        // Only allowlisted Chromium-family browsers attempt AX-based URL
+        // extraction; everything else short-circuits to no URL.
+        let tabURL: String? = {
+            guard processIdentifier != 0, !bundleIdentifier.isEmpty else { return nil }
+            return BrowserTabURLExtractor.activeTabURL(
+                forBundleIdentifier: bundleIdentifier,
+                processIdentifier: processIdentifier
+            )
+        }()
+
+        let hostname = tabURL.flatMap { BrowserTabURLExtractor.hostname(fromRawURL: $0) }
+        let toolName = hostname.flatMap { BrowserTabURLExtractor.deriveToolName(fromHostname: $0) }
+
+        return CapturedChatTurnContext(
+            frontmostAppName: appName,
+            frontmostBundleIdentifier: bundleIdentifier,
+            browserHostname: hostname,
+            browserToolName: toolName,
+            browserTabURL: tabURL
+        )
+    }
+
+    /// Appends a turn to `conversationHistory` and trims to the 10 most
+    /// recent entries so the Claude context doesn't grow unbounded. Isolated
+    /// into its own method so every call site uses the same trim strategy
+    /// and so `ForEach` identity stays stable (we drop the oldest, never
+    /// reshuffle the tail).
+    private func appendChatTurnAndTrimHistory(_ turnRecord: ChatTurnRecord) {
+        conversationHistory.append(turnRecord)
+        let maxHistoryEntries = 10
+        if conversationHistory.count > maxHistoryEntries {
+            conversationHistory.removeFirst(conversationHistory.count - maxHistoryEntries)
+        }
     }
 
     /// Creates a new observer, ensuring the wiki is initialized first so the
@@ -2798,6 +2947,38 @@ final class CompanionManager: ObservableObject {
         Task { [weak self] in
             await self?.wikiPageConsolidator.consolidateIfDuplicatesExist(
                 forPageFilename: sessionPageFilename
+            )
+        }
+    }
+
+    /// Ends the current chat session from the "+ New Chat" button in the
+    /// sidebar. Takes a `ChatSessionEndSnapshot` synchronously on the main
+    /// actor *before* `endCurrentSessionAndCompressForObserver` nils
+    /// `currentSessionObserverAgent`, so a rapid second click can't lose
+    /// the log URL / session identifier. Then clears live history and
+    /// hands the snapshot to the segmenter in a detached task so the UI
+    /// can transition back to an empty "Current" state immediately.
+    func endCurrentChatSessionExplicitly() async {
+        guard let observer = currentSessionObserverAgent else {
+            // No active session — still reset the live transcript so the
+            // chat window shows the empty state.
+            conversationHistory.removeAll()
+            return
+        }
+
+        let snapshot = ChatSessionEndSnapshot(
+            sessionIdentifier: observer.sessionMetadata.sessionIdentifier,
+            sessionLogFileURL: observer.sessionLogFileURL,
+            sessionEndedAt: Date()
+        )
+
+        await endCurrentSessionAndCompressForObserver()
+        conversationHistory.removeAll()
+
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.chatSessionSegmenter.segmentAndInsert(
+                forSessionEndSnapshot: snapshot
             )
         }
     }

@@ -184,6 +184,7 @@ struct CompanionPanelView: View {
                     .scaledToFit()
                     .frame(width: 12, height: 12)
                     .rotationEffect(.degrees(45))
+                    .scaleEffect(x: -1, y: 1)
                     .frame(width: 20, height: 20)
                     .offset(y: -0.75)
                     .accessibilityHidden(true)
