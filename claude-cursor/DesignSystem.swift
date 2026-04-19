@@ -208,6 +208,8 @@ enum DS {
         static let textPrimary = Color(hex: "#1B1917")
         static let textSecondary = Color(hex: "#4A4744")
         static let textTertiary = Color(hex: "#7A766F")
+        /// Placeholder on `surface1` fields (custom overlay; macOS ignores many TextField prompt styles).
+        static let fieldPlaceholder = Color(hex: "#3D3A36")
         static let textOnAccent: Color = .white
 
         // ── Brand accent (same terracotta as global DS; reads on paper) ──

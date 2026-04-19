@@ -76,6 +76,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        CompanionPanelSoundFeedback.shared.playEshopSound()
         companionManager.stop()
     }
 

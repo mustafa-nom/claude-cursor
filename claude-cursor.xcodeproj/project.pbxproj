@@ -40,6 +40,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				ff.mp3,
 			);
 			target = 28F22CBE2F56440300A0FC59 /* claude-cursor */;
 		};

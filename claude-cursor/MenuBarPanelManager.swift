@@ -77,39 +77,27 @@ final class MenuBarPanelManager: NSObject {
     /// legacy rotated triangle if the asset is missing from the bundle.
     private func makeClaudeCursorMenuBarIcon() -> NSImage {
         let iconSideLength: CGFloat = 18
+        let whiteSilhouette: NSImage
         if let assetImage = NSImage(named: "claudeCursor") {
-            return menuBarIconImageByTintingSourceWhite(
-                sourceImage: assetImage,
-                pixelSideLength: iconSideLength
-            )
+            whiteSilhouette = menuBarWhiteSilhouette(from: assetImage, pixelSideLength: iconSideLength)
+        } else {
+            whiteSilhouette = makeFallbackProgrammaticTriangleMenuBarIcon(sideLength: iconSideLength)
         }
-        return makeFallbackProgrammaticTriangleMenuBarIcon(sideLength: iconSideLength)
+        return menuBarIconImageByApplying45DegreeRotation(
+            whiteSilhouette: whiteSilhouette,
+            pixelSideLength: iconSideLength
+        )
     }
 
     /// Fills with white then uses the source alpha (`destinationIn`) so the
     /// vector cursor shape becomes a crisp white glyph (not template-tinted).
-    private func menuBarIconImageByTintingSourceWhite(
-        sourceImage: NSImage,
-        pixelSideLength: CGFloat
-    ) -> NSImage {
+    private func menuBarWhiteSilhouette(from sourceImage: NSImage, pixelSideLength: CGFloat) -> NSImage {
         let outputImage = NSImage(size: NSSize(width: pixelSideLength, height: pixelSideLength))
         outputImage.lockFocus()
         defer { outputImage.unlockFocus() }
 
-        let destinationRect = NSRect(
-            x: 0,
-            y: 0,
-            width: pixelSideLength,
-            height: pixelSideLength
-        )
-        let sourcePixelWidth = sourceImage.size.width
-        let sourcePixelHeight = sourceImage.size.height
-        let sourceRect = NSRect(
-            x: 0,
-            y: 0,
-            width: sourcePixelWidth,
-            height: sourcePixelHeight
-        )
+        let destinationRect = NSRect(x: 0, y: 0, width: pixelSideLength, height: pixelSideLength)
+        let sourceRect = NSRect(origin: .zero, size: sourceImage.size)
 
         NSColor.white.setFill()
         destinationRect.fill()
@@ -126,7 +114,52 @@ final class MenuBarPanelManager: NSObject {
         return outputImage
     }
 
-    /// Legacy menu bar mark — simple rotated triangle matching the on-screen cursor.
+    /// Rotates the white glyph 45° around the center (sign matches SwiftUI `rotationEffect(.degrees(45))` under flipped `NSImage` drawing).
+    /// Slight scale keeps the corners inside the square status-item slot.
+    private func menuBarIconImageByApplying45DegreeRotation(
+        whiteSilhouette: NSImage,
+        pixelSideLength: CGFloat
+    ) -> NSImage {
+        let outputImage = NSImage(size: NSSize(width: pixelSideLength, height: pixelSideLength))
+        outputImage.lockFocus()
+        defer { outputImage.unlockFocus() }
+
+        guard let graphicsContext = NSGraphicsContext.current?.cgContext else {
+            whiteSilhouette.draw(
+                in: NSRect(x: 0, y: 0, width: pixelSideLength, height: pixelSideLength),
+                from: NSRect(origin: .zero, size: whiteSilhouette.size),
+                operation: .sourceOver,
+                fraction: 1.0,
+                respectFlipped: true,
+                hints: [.interpolation: NSImageInterpolation.high]
+            )
+            return outputImage
+        }
+
+        let side = pixelSideLength
+        graphicsContext.saveGState()
+        graphicsContext.translateBy(x: side / 2, y: side / 2)
+        graphicsContext.rotate(by: -CGFloat.pi / 4)
+        let rotationInsetScale: CGFloat = 0.76
+        graphicsContext.scaleBy(x: rotationInsetScale, y: rotationInsetScale)
+        graphicsContext.translateBy(x: -side / 2, y: -side / 2)
+
+        let drawRect = NSRect(x: 0, y: 0, width: side, height: side)
+        whiteSilhouette.draw(
+            in: drawRect,
+            from: NSRect(origin: .zero, size: whiteSilhouette.size),
+            operation: .sourceOver,
+            fraction: 1.0,
+            respectFlipped: true,
+            hints: [.interpolation: NSImageInterpolation.high]
+        )
+        graphicsContext.restoreGState()
+
+        return outputImage
+    }
+
+    /// Legacy menu bar mark — simple upward triangle; rotation is applied in
+    /// `menuBarIconImageByApplying45DegreeRotation` so it matches the asset path.
     private func makeFallbackProgrammaticTriangleMenuBarIcon(sideLength: CGFloat) -> NSImage {
         let image = NSImage(size: NSSize(width: sideLength, height: sideLength))
         image.lockFocus()
@@ -141,17 +174,10 @@ final class MenuBarPanelManager: NSObject {
         let bottomLeft = CGPoint(x: cx - triangleSize / 2, y: cy - height / 3)
         let bottomRight = CGPoint(x: cx + triangleSize / 2, y: cy - height / 3)
 
-        let angle = 35.0 * .pi / 180.0
-        func rotate(_ point: CGPoint) -> CGPoint {
-            let dx = point.x - cx, dy = point.y - cy
-            let cosA = CGFloat(cos(angle)), sinA = CGFloat(sin(angle))
-            return CGPoint(x: cx + cosA * dx - sinA * dy, y: cy + sinA * dx + cosA * dy)
-        }
-
         let path = NSBezierPath()
-        path.move(to: rotate(top))
-        path.line(to: rotate(bottomLeft))
-        path.line(to: rotate(bottomRight))
+        path.move(to: top)
+        path.line(to: bottomLeft)
+        path.line(to: bottomRight)
         path.close()
 
         NSColor.white.setFill()
@@ -166,6 +192,7 @@ final class MenuBarPanelManager: NSObject {
         // Small delay so the status item has time to appear in the menu bar
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             self.showPanel()
+            CompanionPanelSoundFeedback.shared.playEshopSound()
         }
     }
 
