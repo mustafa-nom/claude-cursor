@@ -187,6 +187,54 @@ enum DS {
         }
     }
 
+    /// Always-light “paper” tokens for the menu bar companion panel only.
+    /// Cursor overlay, chat, and other surfaces keep using `DS.Colors`.
+    enum CompanionPanel {
+
+        // ── Surfaces ───────────────────────────────────────────────
+
+        static let background = Color(hex: "#FAF8F5")
+        static let surface1 = Color(hex: "#F3F0EA")
+        static let surface2 = Color(hex: "#EBE7DF")
+        static let surface3 = Color(hex: "#E0DBD2")
+
+        // ── Borders ─────────────────────────────────────────────────
+
+        static let borderSubtle = Color(hex: "#D9D3C9")
+        static let borderStrong = Color(hex: "#C4BDB2")
+
+        // ── Text ────────────────────────────────────────────────────
+
+        static let textPrimary = Color(hex: "#1B1917")
+        static let textSecondary = Color(hex: "#4A4744")
+        static let textTertiary = Color(hex: "#7A766F")
+        static let textOnAccent: Color = .white
+
+        // ── Brand accent (same terracotta as global DS; reads on paper) ──
+
+        static let accent = Colors.brand600
+        static let accentHover = Colors.brand700
+        /// Muted terracotta for status dots and emphasis on light backgrounds.
+        static let accentText = Colors.brand700
+        /// Selected chip / segmented control fill.
+        static let accentSubtle = Colors.brand500.opacity(0.22)
+
+        // ── Semantic ───────────────────────────────────────────────
+
+        static let success = Color(hex: "#047857")
+        static let warning = Color(hex: "#B45309")
+        static let destructive = Colors.destructive
+        static let destructiveText = Color(hex: "#DC2626")
+
+        /// Hover / idle fill behind the panel close control.
+        static let closeButtonBackground = surface2
+
+        /// Custom switch track when off — strong enough contrast on paper (`background`).
+        static let switchTrackOff = Color(hex: "#BDB5A8")
+        /// Hairline around the off-state track so it does not disappear on warm gray fills.
+        static let switchTrackOffBorder = Color(hex: "#9A9285")
+    }
+
     // MARK: - Spacing (for reference, not enforced)
 
     enum Spacing {
