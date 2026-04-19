@@ -1,8 +1,51 @@
-# Hi, this is ClaudeCursor.
+# Claude Cursor
 
-It’s an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and point at UI. Kinda like having a real teacher next to you.
+Your AI-native Mac companion that tutors you in any app with voice Q&A, live navigation tips, on-cursor pointing, and step-by-step tutorials.
 
-**This repo** is the open-source **ClaudeCursor** codebase (`claude-cursor` in Xcode, display name **ClaudeCursor**). Clone it, wire the Cloudflare Worker, and run from source — that’s what the instructions below are for.
+## What problem you're solving and who it's for
+
+**Problem:** Explaining software or getting unstuck usually means breaking flow—tabbing to a browser, re-describing your screen, or watching a generic tutorial that does not match your layout, monitor count, or exact app state.
+
+**Who it is for:** People who learn by doing on a Mac—students, self-taught builders, support-heavy roles, and anyone who wants a patient, voice-first guide that stays beside their work instead of replacing it. It is built for *your* screen and *your* phrasing, not a one-size-fits-all screencast.
+
+## How your solution works (technical overview)
+
+Claude Cursor is a **menu bar-only** app (no dock icon): a custom `NSPanel` control surface plus a full-screen, non-activating **cursor overlay** so explanations and pointing never steal focus from the app you are using.
+
+- **Voice in:** Push-to-talk (Control + Option) captures microphone audio; a **pluggable transcription** layer streams to AssemblyAI by default (OpenAI Whisper upload and Apple Speech are optional fallbacks).
+- **Vision in:** When you engage the companion, **ScreenCaptureKit** grabs screenshots (multi-monitor and, in tutor flows, focused-window capture) and sends them with your transcript to **Claude** over **SSE** through a **Cloudflare Worker**—the app never holds your API keys.
+- **Voice out:** Responses can be read aloud via **ElevenLabs** (also proxied through the Worker).
+- **Pointing:** Claude can drive native tools such as **`point_at_element`** and multi-cursor **`explain_screen_elements`** so labels and arcs land on real coordinates across displays.
+- **Optional automation:** **Anthropic Computer Use** is the default path for agent-style loops (resized screenshots, telemetry, stuck detection). A local CGEvent path remains a **debug-only escape hatch**. Both require **explicit product opt-in** (experimental automation or tutor mode) and **per-sequence consent** before synthetic input runs.
+- **Memory and research (on device):** A local **wiki** under Application Support, **session logs** compressed into pages, **research ingest** (curated sources plus optional Tavily search and fetches through the Worker), and a **SQLite** pattern database back lesson and tutor behavior—see `CLAUDE.md` for the full map.
+
+## What could go wrong, and what safeguards you've built in
+
+| Risk | Mitigation |
+|------|------------|
+| **API keys in the binary** | Keys live only on the **Cloudflare Worker**; the app talks to your proxy endpoints. |
+| **Unwanted clicks or typing** | Automation is **gated** behind settings; **consent UI** on the overlay before actions; **deny-list** for sensitive bundles; **kill switch** to halt a sequence; Computer Use loops **stop on refusal**. |
+| **Sensitive data in screenshots or audio** | Anything you say or show may go to **cloud STT, LLM, and TTS** providers you configure. **Session logging** runs text through a **PII stripper** before wiki ingest; users should still avoid secrets on screen when recording. |
+| **Server-side fetch abuse** | Worker **`/fetch-url`** is used for research/wiki ingest with **SSRF-oriented mitigations** (not a general open proxy). |
+| **Over-trusting the model** | Pointing and steps are **assistive**; clipboard auto-copy **strips internal coordination tags** so pasted text stays clean. |
+
+Nothing removes the need for judgment in high-stakes or regulated environments—treat the companion like a very fast intern with a view of your desk.
+
+## How your project empowers rather than replaces people
+
+The app is designed to **shorten the gap between question and action** on *your* machine: you stay in the driver’s seat, in the app you care about, while the companion **narrates, points, and (only with consent) automates**. Push-to-talk keeps control **rhythm-based**—you decide when you are “on the record.” Tutor and lesson modes bias toward **scaffolding** (what to look at next, why it matters) rather than black-box completion of your work. The local wiki and session summaries aim to **compound what you learned**, not to substitute for understanding.
+
+## Any ethical considerations made when building this project
+
+- **Transparency:** Screen and microphone data leave the device only when you use features that require them; third-party policies for Anthropic, AssemblyAI, ElevenLabs, and any optional providers still apply.
+- **Consent and autonomy:** **Visual consent** and clear opt-ins for automation respect that **mouse and keyboard are high-impact channels**; refusal and timeout paths are first-class.
+- **Privacy-aware logging:** **PII stripping** before session material is compressed into wiki pages reduces accidental long-term retention of secrets—while **not** claiming zero risk (e.g. phone numbers are intentionally not stripped; email domains are preserved for context).
+- **Analytics:** **PostHog** is integrated for product usage insight; operators should disclose that in their own privacy posture if they ship forks.
+- **Open source responsibility:** Forks inherit the same **power and risk** as any screen-aware assistant; documenting safeguards (as here) is part of the ethical baseline.
+
+---
+
+**This repo** is the open-source **Claude Cursor** codebase (`claude-cursor` in Xcode, display name **ClaudeCursor**). Clone it, wire the Cloudflare Worker, and run from source — that is what the instructions below are for.
 
 If you want a **prebuilt app** from the original Clicky / ClaudeCursor product line, you can still download it [here](https://www.clicky.so/) (third-party site, not this GitHub repo).
 
@@ -133,11 +176,9 @@ The app will appear in your menu bar (not the dock). Click the icon to open the 
 - **Screen Recording** — for taking screenshots when you use the hotkey
 - **Screen Content** — for ScreenCaptureKit access
 
-## Architecture
+## Architecture (short)
 
-If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:
-
-**Menu bar app** (no dock icon) with two `NSPanel` windows — one for the control panel dropdown, one for the full-screen transparent cursor overlay. Push-to-talk streams audio over a websocket to AssemblyAI, sends the transcript + screenshot to Claude via streaming SSE, and plays the response through ElevenLabs TTS. Claude can embed `[POINT:x,y:label:screenN]` tags in its responses to make the cursor fly to specific UI elements across multiple monitors. Anthropic, AssemblyAI, and ElevenLabs traffic goes through the Cloudflare Worker; optional routes also proxy OpenAI (Whisper), Tavily, and generic URL fetch — see `worker/src/index.ts`.
+For the full technical breakdown, read [`CLAUDE.md`](CLAUDE.md). In one sentence: **menu bar SwiftUI + AppKit**, **Worker-proxied** Claude / STT / TTS, **ScreenCaptureKit** vision, **SSE** streaming, optional **Computer Use** and local automation behind **consent**, local **wiki + SQLite** for memory and lessons.
 
 ## Project structure
 
