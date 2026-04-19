@@ -388,32 +388,6 @@ final class CompanionManager: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
     }
 
-    /// Whether the user has submitted their email during onboarding.
-    @Published var hasSubmittedEmail: Bool = UserDefaults.standard.bool(forKey: "hasSubmittedEmail")
-
-    /// Submits the user's email to FormSpark and identifies them in PostHog.
-    func submitEmail(_ email: String) {
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedEmail.isEmpty else { return }
-
-        hasSubmittedEmail = true
-        UserDefaults.standard.set(true, forKey: "hasSubmittedEmail")
-
-        // Identify user in PostHog
-        PostHogSDK.shared.identify(trimmedEmail, userProperties: [
-            "email": trimmedEmail
-        ])
-
-        // Submit to FormSpark
-        Task {
-            var request = URLRequest(url: URL(string: "https://submit-form.com/RWbGJxmIs")!)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["email": trimmedEmail])
-            _ = try? await URLSession.shared.data(for: request)
-        }
-    }
-
     func start() {
         refreshAllPermissions()
         print("🔑 ClaudeCursor start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
@@ -1705,6 +1679,7 @@ final class CompanionManager: ObservableObject {
                 // screenshot coordinates, and `copy_response_to_clipboard`
                 // knows what "the current response" means.
                 toolRegistry.beginTurn(withScreenCaptures: screenCaptures)
+                answerPanelController.resetMarkdownTrackingForNewTurn()
                 defer { toolRegistry.endTurn() }
 
                 let toolsAvailableThisTurn = toolRegistry.availableToolsForCurrentTurn()
@@ -1746,29 +1721,6 @@ final class CompanionManager: ObservableObject {
 
                 print("🎯 Element pointing this turn: \(hasPointCoordinate ? "yes" : "no")")
 
-                // Copy the response to the clipboard if the user has enabled
-                // auto-copy. ClipboardManager defensively strips any residual
-                // coordination tags so the pasted text is always user-ready.
-                if isAutoCopyResponseEnabled {
-                    ClipboardManager.copyResponseToClipboard(rawResponseText: spokenText)
-                }
-
-                // Save this exchange to conversation history so future
-                // turns have full context.
-                conversationHistory.append((
-                    userTranscript: transcript,
-                    assistantResponse: spokenText
-                ))
-
-                // Keep only the last 10 exchanges to avoid unbounded context growth
-                if conversationHistory.count > 10 {
-                    conversationHistory.removeFirst(conversationHistory.count - 10)
-                }
-
-                print("🧠 Conversation history: \(conversationHistory.count) exchanges")
-
-                ClaudeCursorAnalytics.trackAIResponseReceived(response: spokenText)
-
                 // ── Adaptive output routing ────────────────────────────────
                 // Decide which surface renders this response. Pointing
                 // gestures stay on the cursor overlay labels; math/code open
@@ -1783,15 +1735,6 @@ final class CompanionManager: ObservableObject {
                     .decideOutputSurface(for: routerDecisionInput)
                 print("🎯 Router chose output surface: \(chosenOutputSurface)")
 
-                // Record this turn in the session observer — captured after
-                // routing so the log reflects which surface rendered the
-                // response. PII stripping happens inside the observer.
-                recordObservedTurn(
-                    userTranscript: transcript,
-                    assistantResponse: spokenText,
-                    outputModeUsed: "\(chosenOutputSurface)"
-                )
-
                 // Route the response to the chosen output surface. Math /
                 // code goes to the Answer panel; navigation plays through
                 // the cursor pointing pipeline (OverlayWindow owns the
@@ -1801,17 +1744,60 @@ final class CompanionManager: ObservableObject {
                     lessonStateMachine.requestTransition(to: .answer)
                 } else if chosenOutputSurface == .navigation {
                     lessonStateMachine.requestTransition(to: .navigation)
+                }
 
-                    // Proactive mode: after a navigation response with a
-                    // pointing coordinate, watch the screen so we can speak
-                    // the next step as soon as the user acts, instead of
-                    // waiting for another push-to-talk.
-                    if hasPointCoordinate {
-                        startPendingNavigationObservation(
-                            afterUserTranscript: transcript,
-                            afterAssistantResponse: spokenText
-                        )
-                    }
+                // Prefer the last markdown shown in the answer panel this turn
+                // (e.g. `open_answer_panel` payload) so chat history and
+                // clipboard match what the user sees when the panel auto-opens.
+                let assistantTextForUserFacingArtifacts = (
+                    answerPanelController.markdownLastPresentedThisTurn ?? spokenText
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // Copy the response to the clipboard if the user has enabled
+                // auto-copy. ClipboardManager defensively strips any residual
+                // coordination tags so the pasted text is always user-ready.
+                if isAutoCopyResponseEnabled {
+                    ClipboardManager.copyResponseToClipboard(
+                        rawResponseText: assistantTextForUserFacingArtifacts
+                    )
+                }
+
+                // Save this exchange to conversation history so future
+                // turns have full context.
+                conversationHistory.append((
+                    userTranscript: transcript,
+                    assistantResponse: assistantTextForUserFacingArtifacts
+                ))
+
+                // Keep only the last 10 exchanges to avoid unbounded context growth
+                if conversationHistory.count > 10 {
+                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                }
+
+                print("🧠 Conversation history: \(conversationHistory.count) exchanges")
+
+                ClaudeCursorAnalytics.trackAIResponseReceived(
+                    response: assistantTextForUserFacingArtifacts
+                )
+
+                // Record this turn in the session observer — captured after
+                // routing so the log reflects which surface rendered the
+                // response. PII stripping happens inside the observer.
+                recordObservedTurn(
+                    userTranscript: transcript,
+                    assistantResponse: assistantTextForUserFacingArtifacts,
+                    outputModeUsed: "\(chosenOutputSurface)"
+                )
+
+                // Proactive mode: after a navigation response with a
+                // pointing coordinate, watch the screen so we can speak
+                // the next step as soon as the user acts, instead of
+                // waiting for another push-to-talk.
+                if chosenOutputSurface == .navigation, hasPointCoordinate {
+                    startPendingNavigationObservation(
+                        afterUserTranscript: transcript,
+                        afterAssistantResponse: assistantTextForUserFacingArtifacts
+                    )
                 }
 
                 // Pick the TTS text: for answer-panel routing, speak a brief
@@ -3207,7 +3193,7 @@ final class CompanionManager: ObservableObject {
     /// credits run out. Uses NSSpeechSynthesizer so it works even when
     /// ElevenLabs is down.
     private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+        let utterance = "You have run out of API credits."
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding

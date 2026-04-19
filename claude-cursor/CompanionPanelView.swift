@@ -3,8 +3,8 @@
 //  claude-cursor
 //
 //  The SwiftUI content hosted inside the menu bar panel. Shows the companion
-//  voice status, push-to-talk shortcut, and quick settings. Designed to feel
-//  like Loom's recording panel — dark, rounded, minimal, and special.
+//  voice status, push-to-talk shortcut, and quick settings. Uses always-light
+//  paper tokens (`DS.CompanionPanel`) for a calm, Claude-adjacent surface.
 //
 
 import AVFoundation
@@ -12,7 +12,6 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
-    @State private var emailInput: String = ""
 
     /// Text the user typed into the "Research a topic" field. Cleared when
     /// the research run finishes successfully; replaced with an inline error
@@ -40,7 +39,7 @@ struct CompanionPanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             panelHeader
             Divider()
-                .background(DS.Colors.borderSubtle)
+                .background(DS.CompanionPanel.borderSubtle)
                 .padding(.horizontal, 16)
 
             permissionsCopySection
@@ -120,7 +119,7 @@ struct CompanionPanelView: View {
                 .frame(height: 12)
 
             Divider()
-                .background(DS.Colors.borderSubtle)
+                .background(DS.CompanionPanel.borderSubtle)
                 .padding(.horizontal, 16)
 
             footerSection
@@ -179,26 +178,26 @@ struct CompanionPanelView: View {
                     .shadow(color: statusDotColor.opacity(0.6), radius: 4)
 
                 Text("Claude Cursor")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
+                    .font(.system(size: 14, weight: .semibold, design: .serif))
+                    .foregroundColor(DS.CompanionPanel.textPrimary)
             }
 
             Spacer()
 
             Text(statusText)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
+                .foregroundColor(DS.CompanionPanel.textTertiary)
 
             Button(action: {
                 NotificationCenter.default.post(name: .claudeCursorDismissPanel, object: nil)
             }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 20, height: 20)
                     .background(
                         Circle()
-                            .fill(Color.white.opacity(0.08))
+                            .fill(DS.CompanionPanel.closeButtonBackground)
                     )
             }
             .buttonStyle(.plain)
@@ -215,33 +214,23 @@ struct CompanionPanelView: View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
             Text("Hold Control+Option to talk.")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+                .foregroundColor(DS.CompanionPanel.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else if companionManager.allPermissionsGranted && !companionManager.hasSubmittedEmail {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Drop your email to get started.")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-                Text("If I keep building this, I'll keep you in the loop.")
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
             Text("You're all set. Hit Start to meet Claude Cursor.")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+                .foregroundColor(DS.CompanionPanel.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.hasCompletedOnboarding {
             // Permissions were revoked after onboarding — tell user to re-grant
             VStack(alignment: .leading, spacing: 6) {
                 Text("Permissions needed")
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
 
                 Text("Some permissions were revoked. Grant all four below to keep using Claude Cursor.")
                     .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -249,80 +238,42 @@ struct CompanionPanelView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Hi, I'm Farza. This is Claude Cursor.")
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
 
                 Text("A side project I made for fun to help me learn stuff as I use my computer.")
                     .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text("Nothing runs in the background. Claude Cursor will only take a screenshot when you press the hot key. So, you can give that permission in peace. If you are still sus, eh, I can't do much there champ.")
                     .font(.system(size: 11))
-                    .foregroundColor(Color(red: 0.9, green: 0.4, blue: 0.4))
+                    .foregroundColor(DS.CompanionPanel.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    // MARK: - Email + Start Button
+    // MARK: - Start Button
 
     @ViewBuilder
     private var startButton: some View {
         if !companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            if !companionManager.hasSubmittedEmail {
-                VStack(spacing: 8) {
-                    TextField("Enter your email", text: $emailInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13))
-                        .foregroundColor(DS.Colors.textPrimary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .fill(Color.white.opacity(0.08))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-                        )
-
-                    Button(action: {
-                        companionManager.submitEmail(emailInput)
-                    }) {
-                        Text("Submit")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(DS.Colors.textOnAccent)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(
-                                RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                                    .fill(emailInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                          ? DS.Colors.accent.opacity(0.4)
-                                          : DS.Colors.accent)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
-                    .disabled(emailInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            } else {
-                Button(action: {
-                    companionManager.triggerOnboarding()
-                }) {
-                    Text("Start")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                                .fill(DS.Colors.accent)
-                        )
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
+            Button(action: {
+                companionManager.triggerOnboarding()
+            }) {
+                Text("Start")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(DS.CompanionPanel.textOnAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                            .fill(DS.CompanionPanel.accent)
+                    )
             }
+            .buttonStyle(.plain)
+            .pointerCursor()
         }
     }
 
@@ -332,7 +283,7 @@ struct CompanionPanelView: View {
         VStack(spacing: 2) {
             Text("PERMISSIONS")
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundColor(DS.Colors.textTertiary)
+                .foregroundColor(DS.CompanionPanel.textTertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 6)
 
@@ -355,12 +306,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "hand.raised")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                    .foregroundColor(isGranted ? DS.CompanionPanel.textTertiary : DS.CompanionPanel.warning)
                     .frame(width: 16)
 
                 Text("Accessibility")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -368,11 +319,11 @@ struct CompanionPanelView: View {
             if isGranted {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(DS.Colors.success)
+                        .fill(DS.CompanionPanel.success)
                         .frame(width: 6, height: 6)
                     Text("Granted")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+                        .foregroundColor(DS.CompanionPanel.success)
                 }
             } else {
                 HStack(spacing: 6) {
@@ -383,12 +334,12 @@ struct CompanionPanelView: View {
                     }) {
                         Text("Grant")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textOnAccent)
+                            .foregroundColor(DS.CompanionPanel.textOnAccent)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                             .background(
                                 Capsule()
-                                    .fill(DS.Colors.accent)
+                                    .fill(DS.CompanionPanel.accent)
                             )
                     }
                     .buttonStyle(.plain)
@@ -403,12 +354,12 @@ struct CompanionPanelView: View {
                     }) {
                         Text("Find App")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textSecondary)
+                            .foregroundColor(DS.CompanionPanel.textSecondary)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                             .background(
                                 Capsule()
-                                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
+                                    .stroke(DS.CompanionPanel.borderSubtle, lineWidth: 0.8)
                             )
                     }
                     .buttonStyle(.plain)
@@ -425,19 +376,19 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "rectangle.dashed.badge.record")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                    .foregroundColor(isGranted ? DS.CompanionPanel.textTertiary : DS.CompanionPanel.warning)
                     .frame(width: 16)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Screen Recording")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
+                        .foregroundColor(DS.CompanionPanel.textSecondary)
 
                     Text(isGranted
                          ? "Only takes a screenshot when you use the hotkey"
                          : "Quit and reopen after granting")
                         .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
+                        .foregroundColor(DS.CompanionPanel.textTertiary)
                 }
             }
 
@@ -446,11 +397,11 @@ struct CompanionPanelView: View {
             if isGranted {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(DS.Colors.success)
+                        .fill(DS.CompanionPanel.success)
                         .frame(width: 6, height: 6)
                     Text("Granted")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+                        .foregroundColor(DS.CompanionPanel.success)
                 }
             } else {
                 Button(action: {
@@ -461,12 +412,12 @@ struct CompanionPanelView: View {
                 }) {
                     Text("Grant")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
+                        .foregroundColor(DS.CompanionPanel.textOnAccent)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(
                             Capsule()
-                                .fill(DS.Colors.accent)
+                                .fill(DS.CompanionPanel.accent)
                         )
                 }
                 .buttonStyle(.plain)
@@ -482,12 +433,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "eye")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                    .foregroundColor(isGranted ? DS.CompanionPanel.textTertiary : DS.CompanionPanel.warning)
                     .frame(width: 16)
 
                 Text("Screen Content")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -495,11 +446,11 @@ struct CompanionPanelView: View {
             if isGranted {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(DS.Colors.success)
+                        .fill(DS.CompanionPanel.success)
                         .frame(width: 6, height: 6)
                     Text("Granted")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+                        .foregroundColor(DS.CompanionPanel.success)
                 }
             } else {
                 Button(action: {
@@ -507,12 +458,12 @@ struct CompanionPanelView: View {
                 }) {
                     Text("Grant")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
+                        .foregroundColor(DS.CompanionPanel.textOnAccent)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(
                             Capsule()
-                                .fill(DS.Colors.accent)
+                                .fill(DS.CompanionPanel.accent)
                         )
                 }
                 .buttonStyle(.plain)
@@ -528,12 +479,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "mic")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                    .foregroundColor(isGranted ? DS.CompanionPanel.textTertiary : DS.CompanionPanel.warning)
                     .frame(width: 16)
 
                 Text("Microphone")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -541,11 +492,11 @@ struct CompanionPanelView: View {
             if isGranted {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(DS.Colors.success)
+                        .fill(DS.CompanionPanel.success)
                         .frame(width: 6, height: 6)
                     Text("Granted")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+                        .foregroundColor(DS.CompanionPanel.success)
                 }
             } else {
                 Button(action: {
@@ -562,12 +513,12 @@ struct CompanionPanelView: View {
                 }) {
                     Text("Grant")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
+                        .foregroundColor(DS.CompanionPanel.textOnAccent)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(
                             Capsule()
-                                .fill(DS.Colors.accent)
+                                .fill(DS.CompanionPanel.accent)
                         )
                 }
                 .buttonStyle(.plain)
@@ -587,12 +538,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: iconName)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                    .foregroundColor(isGranted ? DS.CompanionPanel.textTertiary : DS.CompanionPanel.warning)
                     .frame(width: 16)
 
                 Text(label)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -600,11 +551,11 @@ struct CompanionPanelView: View {
             if isGranted {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(DS.Colors.success)
+                        .fill(DS.CompanionPanel.success)
                         .frame(width: 6, height: 6)
                     Text("Granted")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+                        .foregroundColor(DS.CompanionPanel.success)
                 }
             } else {
                 Button(action: {
@@ -614,12 +565,12 @@ struct CompanionPanelView: View {
                 }) {
                     Text("Grant")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
+                        .foregroundColor(DS.CompanionPanel.textOnAccent)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(
                             Capsule()
-                                .fill(DS.Colors.accent)
+                                .fill(DS.CompanionPanel.accent)
                         )
                 }
                 .buttonStyle(.plain)
@@ -638,12 +589,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "doc.on.clipboard")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Copy responses")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -652,10 +603,8 @@ struct CompanionPanelView: View {
                 get: { companionManager.isAutoCopyResponseEnabled },
                 set: { companionManager.setAutoCopyResponseEnabled($0) }
             ))
-            .toggleStyle(.switch)
+            .toggleStyle(CompanionPanelSwitchToggleStyle())
             .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.8)
         }
         .padding(.vertical, 4)
     }
@@ -667,12 +616,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "cursorarrow")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Show Claude Cursor")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -681,10 +630,8 @@ struct CompanionPanelView: View {
                 get: { companionManager.isClaudeCursorEnabled },
                 set: { companionManager.setClaudeCursorEnabled($0) }
             ))
-            .toggleStyle(.switch)
+            .toggleStyle(CompanionPanelSwitchToggleStyle())
             .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.8)
         }
         .padding(.vertical, 4)
     }
@@ -694,12 +641,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "graduationcap")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Tutor mode")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -708,10 +655,8 @@ struct CompanionPanelView: View {
                 get: { companionManager.isTutorModeEnabled },
                 set: { companionManager.setTutorModeEnabled($0) }
             ))
-            .toggleStyle(.switch)
+            .toggleStyle(CompanionPanelSwitchToggleStyle())
             .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.8)
         }
         .padding(.vertical, 4)
     }
@@ -723,12 +668,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "book.closed")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Wiki knowledge")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -737,10 +682,8 @@ struct CompanionPanelView: View {
                 get: { companionManager.isWikiKnowledgeEnabled },
                 set: { companionManager.setWikiKnowledgeEnabled($0) }
             ))
-            .toggleStyle(.switch)
+            .toggleStyle(CompanionPanelSwitchToggleStyle())
             .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.8)
         }
         .padding(.vertical, 4)
     }
@@ -759,12 +702,12 @@ struct CompanionPanelView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "books.vertical")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(DS.Colors.textTertiary)
+                        .foregroundColor(DS.CompanionPanel.textTertiary)
                         .frame(width: 16)
 
                     Text("Research a topic")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
+                        .foregroundColor(DS.CompanionPanel.textSecondary)
                 }
 
                 HStack(spacing: 8) {
@@ -774,16 +717,16 @@ struct CompanionPanelView: View {
                     )
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .foregroundColor(DS.Colors.textPrimary)
+                    .foregroundColor(DS.CompanionPanel.textPrimary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: DS.CornerRadius.small)
-                            .fill(Color.white.opacity(0.06))
+                            .fill(DS.CompanionPanel.surface1)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: DS.CornerRadius.small)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            .stroke(DS.CompanionPanel.borderSubtle, lineWidth: 1)
                     )
                     .onSubmit { triggerResearchForCurrentInput() }
                     .disabled(isResearchInProgress)
@@ -811,7 +754,7 @@ struct CompanionPanelView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Capsule().fill(DS.Colors.accent.opacity(0.7)))
+            .background(Capsule().fill(DS.CompanionPanel.accent.opacity(0.7)))
         } else {
             Button(action: triggerResearchForCurrentInput) {
                 Text("Research")
@@ -819,7 +762,7 @@ struct CompanionPanelView: View {
                     .foregroundColor(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(Capsule().fill(DS.Colors.accent))
+                    .background(Capsule().fill(DS.CompanionPanel.accent))
             }
             .buttonStyle(.plain)
             .pointerCursor()
@@ -887,12 +830,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "cursorarrow.click")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Auto-click (experimental)")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -901,10 +844,8 @@ struct CompanionPanelView: View {
                 get: { companionManager.isAutomationExperimentalEnabled },
                 set: { companionManager.setAutomationExperimentalEnabled($0) }
             ))
-            .toggleStyle(.switch)
+            .toggleStyle(CompanionPanelSwitchToggleStyle())
             .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.8)
         }
         .padding(.vertical, 4)
     }
@@ -919,7 +860,7 @@ struct CompanionPanelView: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "wrench.and.screwdriver")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
+                .foregroundColor(DS.CompanionPanel.textTertiary)
                 .frame(width: 16)
                 .padding(.top, 2)
 
@@ -927,20 +868,18 @@ struct CompanionPanelView: View {
                 HStack {
                     Text("Force one-shot automation (debug)")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
+                        .foregroundColor(DS.CompanionPanel.textSecondary)
                     Spacer()
                     Toggle("", isOn: Binding(
                         get: { companionManager.preferOneShotAutomationForDebugging },
                         set: { companionManager.setPreferOneShotAutomationForDebugging($0) }
                     ))
-                    .toggleStyle(.switch)
+                    .toggleStyle(CompanionPanelSwitchToggleStyle())
                     .labelsHidden()
-                    .tint(DS.Colors.accent)
-                    .scaleEffect(0.8)
                 }
                 Text("Bypasses the Computer Use agent loop and runs the legacy one-shot CGEvent path instead. Only use when the Computer Use beta is unavailable.")
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -954,12 +893,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "text.bubble")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Show chat")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
@@ -968,10 +907,8 @@ struct CompanionPanelView: View {
                 get: { companionManager.isShowChatEnabled },
                 set: { companionManager.setShowChatEnabled($0) }
             ))
-            .toggleStyle(.switch)
+            .toggleStyle(CompanionPanelSwitchToggleStyle())
             .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.8)
         }
         .padding(.vertical, 4)
     }
@@ -983,12 +920,12 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "play.rectangle")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Follow-along tutorial")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             HStack(spacing: 8) {
@@ -1005,16 +942,16 @@ struct CompanionPanelView: View {
                 ))
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
-                .foregroundColor(DS.Colors.textPrimary)
+                .foregroundColor(DS.CompanionPanel.textPrimary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .background(
                     RoundedRectangle(cornerRadius: DS.CornerRadius.small)
-                        .fill(Color.white.opacity(0.06))
+                        .fill(DS.CompanionPanel.surface1)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.CornerRadius.small)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        .stroke(DS.CompanionPanel.borderSubtle, lineWidth: 1)
                 )
                 .disabled(companionManager.isLessonLoading)
 
@@ -1024,12 +961,12 @@ struct CompanionPanelView: View {
             if let currentLessonLoadError = companionManager.lessonLoadErrorMessage {
                 Text(currentLessonLoadError)
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundColor(DS.Colors.destructiveText)
+                    .foregroundColor(DS.CompanionPanel.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             } else if let currentlyRunningLesson = companionManager.activeLesson {
                 Text("In progress: \(currentlyRunningLesson.videoTitle)")
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -1054,7 +991,7 @@ struct CompanionPanelView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(
-                        Capsule().fill(DS.Colors.destructive)
+                        Capsule().fill(DS.CompanionPanel.destructive)
                     )
             }
             .buttonStyle(.plain)
@@ -1071,7 +1008,7 @@ struct CompanionPanelView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(
-                Capsule().fill(DS.Colors.accent.opacity(0.7))
+                Capsule().fill(DS.CompanionPanel.accent.opacity(0.7))
             )
         } else {
             Button(action: {
@@ -1085,8 +1022,8 @@ struct CompanionPanelView: View {
                     .background(
                         Capsule()
                             .fill(companionManager.followAlongTutorialURL.isEmpty
-                                ? DS.Colors.accent.opacity(0.4)
-                                : DS.Colors.accent)
+                                ? DS.CompanionPanel.accent.opacity(0.4)
+                                : DS.CompanionPanel.accent)
                     )
             }
             .buttonStyle(.plain)
@@ -1100,19 +1037,19 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "mic.badge.waveform")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(DS.CompanionPanel.textTertiary)
                     .frame(width: 16)
 
                 Text("Speech to Text")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(DS.CompanionPanel.textSecondary)
             }
 
             Spacer()
 
             Text(companionManager.buddyDictationManager.transcriptionProviderDisplayName)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
+                .foregroundColor(DS.CompanionPanel.textTertiary)
         }
         .padding(.vertical, 4)
     }
@@ -1123,7 +1060,7 @@ struct CompanionPanelView: View {
         HStack {
             Text("Model")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+                .foregroundColor(DS.CompanionPanel.textSecondary)
 
             Spacer()
 
@@ -1133,11 +1070,11 @@ struct CompanionPanelView: View {
             }
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
+                    .fill(DS.CompanionPanel.surface1)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                    .stroke(DS.CompanionPanel.borderSubtle, lineWidth: 0.5)
             )
         }
         .padding(.vertical, 4)
@@ -1150,12 +1087,12 @@ struct CompanionPanelView: View {
         }) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .foregroundColor(isSelected ? DS.CompanionPanel.textPrimary : DS.CompanionPanel.textTertiary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                        .fill(isSelected ? DS.CompanionPanel.accentSubtle : Color.clear)
                 )
         }
         .buttonStyle(.plain)
@@ -1166,6 +1103,7 @@ struct CompanionPanelView: View {
 
     private var footerSection: some View {
         HStack {
+            Spacer(minLength: 0)
             Button(action: {
                 NSApp.terminate(nil)
             }) {
@@ -1175,51 +1113,51 @@ struct CompanionPanelView: View {
                     Text("Quit Claude Cursor")
                         .font(.system(size: 12, weight: .medium))
                 }
-                .foregroundColor(DS.Colors.textTertiary)
+                .foregroundColor(DS.CompanionPanel.textTertiary)
             }
             .buttonStyle(.plain)
             .pointerCursor()
-
-            if companionManager.hasCompletedOnboarding {
-                Spacer()
-
-                Button(action: {
-                    companionManager.replayOnboarding()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "play.circle")
-                            .font(.system(size: 11, weight: .medium))
-                        Text("Watch Onboarding Again")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .foregroundColor(DS.Colors.textTertiary)
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-            }
+            Spacer(minLength: 0)
         }
+        // if companionManager.hasCompletedOnboarding {
+        //     Button(action: { companionManager.replayOnboarding() }) {
+        //         HStack(spacing: 6) {
+        //             Image(systemName: "play.circle")
+        //                 .font(.system(size: 11, weight: .medium))
+        //             Text("Watch Onboarding Again")
+        //                 .font(.system(size: 12, weight: .medium))
+        //         }
+        //         .foregroundColor(DS.CompanionPanel.textTertiary)
+        //     }
+        //     .buttonStyle(.plain)
+        //     .pointerCursor()
+        // }
     }
 
     // MARK: - Visual Helpers
 
     private var panelBackground: some View {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(DS.Colors.background)
-            .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 10)
-            .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+            .fill(DS.CompanionPanel.background)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(DS.CompanionPanel.borderSubtle, lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.08), radius: 24, x: 0, y: 10)
+            .shadow(color: Color.black.opacity(0.04), radius: 2, x: 0, y: 1)
     }
 
     private var statusDotColor: Color {
         if !companionManager.isOverlayVisible {
-            return DS.Colors.textTertiary
+            return DS.CompanionPanel.textTertiary
         }
         switch companionManager.voiceState {
         case .idle:
-            return DS.Colors.success
+            return DS.CompanionPanel.success
         case .listening:
-            return DS.Colors.accentText
+            return DS.CompanionPanel.accentText
         case .processing, .responding:
-            return DS.Colors.accentText
+            return DS.CompanionPanel.accentText
         }
     }
 
@@ -1242,4 +1180,46 @@ struct CompanionPanelView: View {
         }
     }
 
+}
+
+// MARK: - Companion panel switch (visible off-state on paper background)
+
+private struct CompanionPanelSwitchToggleStyle: ToggleStyle {
+    private let trackWidth: CGFloat = 40
+    private let trackHeight: CGFloat = 22
+    private let knobSideLength: CGFloat = 18
+    private let knobHorizontalInset: CGFloat = 2
+
+    func makeBody(configuration: Configuration) -> some View {
+        let knobLeadingOffsetWhenOn = trackWidth - knobSideLength - knobHorizontalInset
+
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(configuration.isOn ? DS.CompanionPanel.accent : DS.CompanionPanel.switchTrackOff)
+                    .frame(width: trackWidth, height: trackHeight)
+                    .overlay(
+                        Capsule()
+                            .stroke(
+                                configuration.isOn ? Color.clear : DS.CompanionPanel.switchTrackOffBorder,
+                                lineWidth: 1
+                            )
+                    )
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: knobSideLength, height: knobSideLength)
+                    .shadow(color: Color.black.opacity(0.15), radius: 2, x: 0, y: 1)
+                    .offset(x: configuration.isOn ? knobLeadingOffsetWhenOn : knobHorizontalInset)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.85), value: configuration.isOn)
+            }
+            .frame(width: trackWidth, height: trackHeight, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(configuration.isOn ? Text("On") : Text("Off"))
+    }
 }

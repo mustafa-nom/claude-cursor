@@ -65,22 +65,76 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        button.image = makeClaudeCursorMenuBarIcon()
-        button.image?.isTemplate = true
+        let menuBarIcon = makeClaudeCursorMenuBarIcon()
+        menuBarIcon.isTemplate = false
+        button.image = menuBarIcon
         button.action = #selector(statusItemClicked)
         button.target = self
     }
 
-    /// Draws the ClaudeCursor triangle as a menu bar icon. Uses the same shape
-    /// and rotation as the in-app cursor so the menu bar icon matches.
+    /// Menu bar image: bundled `claudeCursor` asset (same mark as in-app) tinted
+    /// solid white so it reads clearly on the dark menu bar. Falls back to the
+    /// legacy rotated triangle if the asset is missing from the bundle.
     private func makeClaudeCursorMenuBarIcon() -> NSImage {
-        let iconSize: CGFloat = 18
-        let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
-        image.lockFocus()
+        let iconSideLength: CGFloat = 18
+        if let assetImage = NSImage(named: "claudeCursor") {
+            return menuBarIconImageByTintingSourceWhite(
+                sourceImage: assetImage,
+                pixelSideLength: iconSideLength
+            )
+        }
+        return makeFallbackProgrammaticTriangleMenuBarIcon(sideLength: iconSideLength)
+    }
 
-        let triangleSize = iconSize * 0.7
-        let cx = iconSize * 0.50
-        let cy = iconSize * 0.50
+    /// Fills with white then uses the source alpha (`destinationIn`) so the
+    /// vector cursor shape becomes a crisp white glyph (not template-tinted).
+    private func menuBarIconImageByTintingSourceWhite(
+        sourceImage: NSImage,
+        pixelSideLength: CGFloat
+    ) -> NSImage {
+        let outputImage = NSImage(size: NSSize(width: pixelSideLength, height: pixelSideLength))
+        outputImage.lockFocus()
+        defer { outputImage.unlockFocus() }
+
+        let destinationRect = NSRect(
+            x: 0,
+            y: 0,
+            width: pixelSideLength,
+            height: pixelSideLength
+        )
+        let sourcePixelWidth = sourceImage.size.width
+        let sourcePixelHeight = sourceImage.size.height
+        let sourceRect = NSRect(
+            x: 0,
+            y: 0,
+            width: sourcePixelWidth,
+            height: sourcePixelHeight
+        )
+
+        NSColor.white.setFill()
+        destinationRect.fill()
+
+        sourceImage.draw(
+            in: destinationRect,
+            from: sourceRect,
+            operation: .destinationIn,
+            fraction: 1.0,
+            respectFlipped: true,
+            hints: [.interpolation: NSImageInterpolation.high]
+        )
+
+        return outputImage
+    }
+
+    /// Legacy menu bar mark — simple rotated triangle matching the on-screen cursor.
+    private func makeFallbackProgrammaticTriangleMenuBarIcon(sideLength: CGFloat) -> NSImage {
+        let image = NSImage(size: NSSize(width: sideLength, height: sideLength))
+        image.lockFocus()
+        defer { image.unlockFocus() }
+
+        let triangleSize = sideLength * 0.7
+        let cx = sideLength * 0.50
+        let cy = sideLength * 0.50
         let height = triangleSize * sqrt(3.0) / 2.0
 
         let top = CGPoint(x: cx, y: cy + height / 1.5)
@@ -100,10 +154,9 @@ final class MenuBarPanelManager: NSObject {
         path.line(to: rotate(bottomRight))
         path.close()
 
-        NSColor.black.setFill()
+        NSColor.white.setFill()
         path.fill()
 
-        image.unlockFocus()
         return image
     }
 

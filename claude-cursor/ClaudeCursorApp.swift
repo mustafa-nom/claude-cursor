@@ -37,7 +37,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // their default-value expressions (stored-property initializers run
         // before the body of init()).
         //
-        // One-time state flags (`hasCompletedOnboarding`, `hasSubmittedEmail`,
+        // One-time state flags (`hasCompletedOnboarding`,
         // `hasScreenContentPermission`, `selectedClaudeModel`) are
         // intentionally *not* reset — those represent durable onboarding /
         // permission state, not panel toggles.
