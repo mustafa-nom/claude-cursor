@@ -1,0 +1,6 @@
+name = "cc-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+ELEVENLABS_VOICE_ID = "UgBBYS2sOqTuMpoF3BR0"
