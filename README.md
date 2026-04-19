@@ -12,12 +12,15 @@ Your AI-native Mac companion that tutors you in any app with voice Q&A, live nav
 
 Claude Cursor is a **menu bar-only** app (no dock icon): a custom `NSPanel` control surface plus a full-screen, non-activating **cursor overlay** so explanations and pointing never steal focus from the app you are using.
 
-- **Voice in:** Push-to-talk (Control + Option) captures microphone audio; a **pluggable transcription** layer streams to AssemblyAI by default (OpenAI Whisper upload and Apple Speech are optional fallbacks).
-- **Vision in:** When you engage the companion, **ScreenCaptureKit** grabs screenshots (multi-monitor and, in tutor flows, focused-window capture) and sends them with your transcript to **Claude** over **SSE** through a **Cloudflare Worker**—the app never holds your API keys.
-- **Voice out:** Responses can be read aloud via **ElevenLabs** (also proxied through the Worker).
-- **Pointing:** Claude can drive native tools such as **`point_at_element`** and multi-cursor **`explain_screen_elements`** so labels and arcs land on real coordinates across displays.
-- **Optional automation:** **Anthropic Computer Use** is the default path for agent-style loops (resized screenshots, telemetry, stuck detection). A local CGEvent path remains a **debug-only escape hatch**. Both require **explicit product opt-in** (experimental automation or tutor mode) and **per-sequence consent** before synthetic input runs.
-- **Memory and research (on device):** A local **wiki** under Application Support, **session logs** compressed into pages, **research ingest** (curated sources plus optional Tavily search and fetches through the Worker), and a **SQLite** pattern database back lesson and tutor behavior—see `CLAUDE.md` for the full map.
+Privacy- and safety-oriented design choices (what we minimized on the device, what still leaves it when you use a feature, and how high-impact actions are gated) are summarized under **[Ethical alignment and responsible use](#ethical-alignment-and-responsible-use)**.
+
+**Why Claude is core, not bolted on.** The product is *screen-grounded*: companion turns pair what you said with labeled **ScreenCaptureKit** JPEGs (multi-monitor; tutor flows can use **focused-window** capture). Claude does not only return prose—it runs **native tool rounds** (`tool_use` / `tool_result`) so its decisions become **real UI**: cursor flights, labels, answer surfaces, wiki lookups, lesson starts, and the consent-gated path into automation. A local **wiki loop** feeds compressed, queryable memory back into prompts so behavior compounds on *your* Mac over time instead of resetting every session.
+
+**Runtime companion (voice, chat, tools).** **Push-to-talk** (Control + Option) drives a **pluggable transcription** layer (AssemblyAI streaming by default; OpenAI Whisper upload or Apple Speech optional). **Typed chat** uses the same pipeline. Screenshots and text go to **Claude** via the Worker’s **`POST /chat`** proxy (**no API keys in the app binary**). The client uses **SSE** streaming and `ClaudeAPI.analyzeImageStreamingWithTools`: bounded **tool-use iterations** execute **`CompanionToolRegistry`** handlers—e.g. **`point_at_element`**, multi-cursor **`explain_screen_elements`**, **`query_wiki`**, clipboard helpers, **`start_youtube_lesson`**, and automation entry. The in-app model picker targets **Claude Sonnet-class** models by default. **ElevenLabs** TTS (Worker **`POST /tts`**) can read replies aloud.
+
+**Every other Claude call site on the critical path.** **Tutor** idle nudges reuse tool streaming with focused-window capture after an inline **yes/no** bubble. **Post-navigation follow-up** polls the screen and only re-prompts when a **perceptual hash** sees a meaningful change; the model either gives the next step or stays quiet (`WAIT`). **Lesson overlay** alignment restricts tools to **`point_at_element`** so YouTube-derived steps land on **live** pixels. **Onboarding** uses a **cursor-screen-only** image and a **restricted tool allowlist**. **Guided automation** defaults to **`runComputerUseAgentLoop`** (Anthropic **Computer Use** `computer_20251124`): JPEGs resized to **declared tool geometry**, JSONL + rollup telemetry, stuck detection, and the loop **stops on the first deny-list refusal**; a legacy one-shot **CGEvent** path remains a **debug-only** escape hatch—both paths require the same product opt-ins and **per-sequence consent**. **`ElementLocationDetector`** makes a separate Computer Use–shaped call for **high-precision coordinates** (aspect-ratio-matched resize, mapped back to display points). **YouTube lessons** pull captions through the Worker, then Claude turns the transcript into **structured step JSON** with timestamps. **Session observation** feeds **SessionCompressor** (plus an optional **cold-start recap** from the latest session). **ResearchSourceCompressor** distills ingested sources into wiki pages. **WikiPageConsolidator** merges duplicate or overlapping pages. Those structured outputs feed **`WikiQueryEngine`**, which is what **`query_wiki`** retrieves. **SQLite** (`PatternDatabase`) backs lesson progress, tutor rate limits, and related analytics—see [`CLAUDE.md`](CLAUDE.md) for the full file map.
+
+**Integration quality (short).** The Worker forwards **`anthropic-beta`** for Computer Use; **SSE** keeps the overlay responsive; iteration caps and run telemetry bound cost and runaway loops. Deeper architecture lives in [`CLAUDE.md`](CLAUDE.md).
 
 ## What could go wrong, and what safeguards you've built in
 
@@ -35,13 +38,25 @@ Nothing removes the need for judgment in high-stakes or regulated environments�
 
 The app is designed to **shorten the gap between question and action** on *your* machine: you stay in the driver’s seat, in the app you care about, while the companion **narrates, points, and (only with consent) automates**. Push-to-talk keeps control **rhythm-based**—you decide when you are “on the record.” Tutor and lesson modes bias toward **scaffolding** (what to look at next, why it matters) rather than black-box completion of your work. The local wiki and session summaries aim to **compound what you learned**, not to substitute for understanding.
 
-## Any ethical considerations made when building this project
+## Ethical alignment and responsible use
 
-- **Transparency:** Screen and microphone data leave the device only when you use features that require them; third-party policies for Anthropic, AssemblyAI, ElevenLabs, and any optional providers still apply.
-- **Consent and autonomy:** **Visual consent** and clear opt-ins for automation respect that **mouse and keyboard are high-impact channels**; refusal and timeout paths are first-class.
-- **Privacy-aware logging:** **PII stripping** before session material is compressed into wiki pages reduces accidental long-term retention of secrets—while **not** claiming zero risk (e.g. phone numbers are intentionally not stripped; email domains are preserved for context).
-- **Analytics:** **PostHog** is integrated for product usage insight; operators should disclose that in their own privacy posture if they ship forks.
-- **Open source responsibility:** Forks inherit the same **power and risk** as any screen-aware assistant; documenting safeguards (as here) is part of the ethical baseline.
+We treated this as a **risk-aware desktop assistant**: anything that can see the screen or synthesize input deserves **intentional limits**, not “ship fast and hope.” The mitigations in **[What could go wrong](#what-could-go-wrong-and-what-safeguards-youve-built-in)** are the operational counterpart to the choices below.
+
+- **Interaction-scoped memory, not ambient surveillance.** Session logs (`ObserverAgent`) record **text turns only when the companion actually handles a user↔assistant exchange**—there is no always-on transcript of the Mac. A session **starts on the first such turn** and **ends on idle or app quit** before optional wiki compression. That narrows what gets written to disk compared with continuous background logging.
+
+- **Rhythm-based capture and honest cloud exposure.** **Push-to-talk** keeps the default mic path **user-gated**. Screenshots are taken to serve an **explicit** companion flow (hotkey, chat, tutor observation, automation step, etc.), not as a continuous upload pipeline. When you *do* use those features, audio, images, and model payloads may still reach **Anthropic**, **AssemblyAI**, **ElevenLabs**, and any optional providers you configure—third-party policies still apply.
+
+- **Proactive tutor: ask first, then throttle.** Tutor nudges show a **yes/no** prompt before the model speaks. **SQLite**-backed rate limits cap how often nudges can fire and apply **backoff** after repeated declines so the product does not nag indefinitely.
+
+- **Automation as a high-impact channel.** Experimental automation and tutor mode are **opt-ins**. **Per-sequence consent** on the overlay, a bundle **deny-list**, a **kill switch**, and **Computer Use refusal handling** (loop stops on first blocked action) treat mouse and keyboard as privileged—not something the model gets “for free.”
+
+- **Logging hygiene without pretending the risk is zero.** **`PIIStripper`** runs **before** session text is appended to disk. **Wiki compression** skips very short sessions (fewer than two turns) to avoid noise and unnecessary Claude calls; published pages are **summaries**, not raw dumps. **Residual risk remains** by design—e.g. phone numbers are **not** stripped; email addresses keep **domains** for context—so users should still avoid secrets on screen or in speech.
+
+- **Server-side fetch boundaries.** Worker **`/fetch-url`** (research / wiki ingest) uses **SSRF-oriented mitigations** so the infrastructure cannot be turned into a generic open proxy.
+
+- **Analytics transparency.** **PostHog** is integrated for product insight; anyone shipping a fork should disclose that in their own privacy posture.
+
+- **Open source responsibility.** Forks inherit the same capabilities and risks as any screen-aware assistant; documenting safeguards (as here) is part of the baseline we expect operators to uphold.
 
 ---
 
