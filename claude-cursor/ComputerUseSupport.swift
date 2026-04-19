@@ -107,6 +107,43 @@ enum ComputerUseImageFormatting {
     }
 }
 
+// MARK: - Computer Use `type` action normalization
+
+/// Interprets model `type` payloads so a mistaken trailing word `return` (e.g. `cursorreturn`)
+/// becomes typed text plus a real Return keypress instead of literal letters.
+enum ComputerUseTypeTextNormalization {
+
+    struct NormalizedTypeAction {
+        let textToType: String
+        let shouldPressReturnAfterTyping: Bool
+    }
+
+    static func normalizedTypeAction(from rawText: String) -> NormalizedTypeAction {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return NormalizedTypeAction(textToType: "", shouldPressReturnAfterTyping: true)
+        }
+        let lowercasedTrimmed = trimmed.lowercased()
+        if lowercasedTrimmed == "return" || lowercasedTrimmed == "enter" {
+            return NormalizedTypeAction(textToType: "", shouldPressReturnAfterTyping: true)
+        }
+
+        let returnSuffix = "return"
+        guard lowercasedTrimmed.hasSuffix(returnSuffix), trimmed.count >= returnSuffix.count else {
+            return NormalizedTypeAction(textToType: trimmed, shouldPressReturnAfterTyping: false)
+        }
+
+        let prefixEndIndex = trimmed.index(trimmed.endIndex, offsetBy: -returnSuffix.count)
+        let textBeforeSuffix = trimmed[..<prefixEndIndex]
+        if let lastCharacterBeforeSuffix = textBeforeSuffix.last, lastCharacterBeforeSuffix.isWhitespace {
+            return NormalizedTypeAction(textToType: trimmed, shouldPressReturnAfterTyping: false)
+        }
+
+        let textPrefix = String(textBeforeSuffix)
+        return NormalizedTypeAction(textToType: textPrefix, shouldPressReturnAfterTyping: true)
+    }
+}
+
 // MARK: - Target display
 
 enum ComputerUseTargetDisplay {

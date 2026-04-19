@@ -155,7 +155,7 @@ final class ComputerUseActionExecutor {
             try? await Task.sleep(nanoseconds: 150_000_000)
             outcome = await captureScreenshotResult(prefixText: "moved mouse to \(screenPoint)", actionType: actionType)
         case "type":
-            guard let textToType = actionDict["text"] as? String else {
+            guard let rawTypeText = actionDict["text"] as? String else {
                 return ActionResult(
                     screenshotBase64: nil,
                     screenshotMediaType: "image/jpeg",
@@ -163,10 +163,26 @@ final class ComputerUseActionExecutor {
                     isError: true
                 )
             }
-            automationEngine.dispatchSyntheticTextInput(textToType: textToType)
+            let normalizedTypeAction = ComputerUseTypeTextNormalization.normalizedTypeAction(from: rawTypeText)
+            if !normalizedTypeAction.textToType.isEmpty {
+                automationEngine.dispatchSyntheticTextInput(textToType: normalizedTypeAction.textToType)
+            }
+            if normalizedTypeAction.shouldPressReturnAfterTyping {
+                automationEngine.dispatchSyntheticReturnKeyPress()
+            }
             try? await Task.sleep(nanoseconds: 200_000_000)
+            let typeSummaryPrefix: String = {
+                let typedSnippet = normalizedTypeAction.textToType.prefix(30)
+                if normalizedTypeAction.shouldPressReturnAfterTyping {
+                    if typedSnippet.isEmpty {
+                        return "pressed Return"
+                    }
+                    return "typed \(typedSnippet), pressed Return"
+                }
+                return "typed \(typedSnippet)"
+            }()
             outcome = await captureScreenshotResult(
-                prefixText: "typed \(textToType.prefix(30))",
+                prefixText: typeSummaryPrefix,
                 actionType: actionType
             )
         case "key":

@@ -574,6 +574,11 @@ final class AutomationEngine {
 
         guard let finalKey = keyCharacter, !finalKey.isEmpty else { return }
 
+        if finalKey == "return" || finalKey == "enter" {
+            dispatchSyntheticReturnKeyPress(modifierFlags: modifierFlags)
+            return
+        }
+
         let unicodeScalars = Array(finalKey.utf16)
 
         let keyDown = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: true)
@@ -585,6 +590,20 @@ final class AutomationEngine {
         keyUp?.keyboardSetUnicodeString(stringLength: unicodeScalars.count, unicodeString: unicodeScalars)
         keyUp?.flags = modifierFlags
         keyUp?.post(tap: .cghidEventTap)
+    }
+
+    /// Primary Return key on US/INTL Mac keyboards — matches keycode 36 used in consent UI handling.
+    func dispatchSyntheticReturnKeyPress(modifierFlags: CGEventFlags = []) {
+        let eventSource = CGEventSource(stateID: .hidSystemState)
+        let returnVirtualKey: CGKeyCode = 36
+        guard let keyDown = CGEvent(keyboardEventSource: eventSource, virtualKey: returnVirtualKey, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: eventSource, virtualKey: returnVirtualKey, keyDown: false) else {
+            return
+        }
+        keyDown.flags = modifierFlags
+        keyUp.flags = modifierFlags
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
     }
 
     /// Types a short text string one character at a time via

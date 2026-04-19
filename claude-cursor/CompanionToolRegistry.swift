@@ -1078,6 +1078,7 @@ final class CompanionToolRegistry {
             if something doesn't look right, try an alternative approach. \
             be precise with your clicks — verify element positions in each \
             screenshot before clicking. \
+            after typing a URL or search query in an address or search field, submit with a key action for Return — never type the word return as text. \
             use the suggested checkpoints as anchors when they match what you see; \
             they were inferred from the same screen context but may be approximate.
             """

@@ -270,7 +270,9 @@ class ClaudeAPI {
                 accumulatedResponseText += textChunk
                 // Send the accumulated text so far to the UI for progressive rendering
                 let currentAccumulatedText = accumulatedResponseText
-                await onTextChunk(currentAccumulatedText)
+                await MainActor.run {
+                    onTextChunk(currentAccumulatedText)
+                }
             }
         }
 
@@ -533,7 +535,9 @@ class ClaudeAPI {
                         accumulatedFinalResponseText += textChunk
                         assistantTextAccumulatorsByBlockIndex[blockIndex, default: ""] += textChunk
                         let snapshotOfAccumulatedText = accumulatedFinalResponseText
-                        await onTextChunk(snapshotOfAccumulatedText)
+                        await MainActor.run {
+                            onTextChunk(snapshotOfAccumulatedText)
+                        }
                     } else if deltaType == "input_json_delta",
                               let partialJSONChunk = delta["partial_json"] as? String {
                         inFlightToolUseBuildersByBlockIndex[blockIndex]?
@@ -766,7 +770,7 @@ class ClaudeAPI {
         var capturedRefusal: ComputerUseRefusal?
 
         for iterationIndex in 0..<Self.maximumComputerUseIterations {
-            if await isHaltRequested() {
+            if await MainActor.run { isHaltRequested() } {
                 accumulatedSpokenText += " [halted by user]"
                 break
             }
@@ -784,7 +788,10 @@ class ClaudeAPI {
 
             print("🖥️ Computer Use iteration \(iterationIndex + 1)/\(Self.maximumComputerUseIterations)")
             iterationsUsed = iterationIndex + 1
-            await onStatusUpdate("Computer Use step \(iterationIndex + 1)/\(Self.maximumComputerUseIterations)")
+            let statusLine = "Computer Use step \(iterationIndex + 1)/\(Self.maximumComputerUseIterations)"
+            await MainActor.run {
+                onStatusUpdate(statusLine)
+            }
 
             let (responseData, httpResponse) = try await session.data(for: request)
 
@@ -847,7 +854,7 @@ class ClaudeAPI {
                 let toolUseID = (toolBlock["id"] as? String) ?? ""
                 let inputDict = (toolBlock["input"] as? [String: Any]) ?? [:]
 
-                if await isHaltRequested() {
+                if await MainActor.run { isHaltRequested() } {
                     toolResultBlocks.append([
                         "type": "tool_result",
                         "tool_use_id": toolUseID,
@@ -872,7 +879,10 @@ class ClaudeAPI {
                         blockedBundleIdentifier: blockedBundleIdentifier,
                         iterationsAtRefusal: iterationsUsed
                     )
-                    await onStatusUpdate("cannot automate \(blockedBundleIdentifier) — protected app")
+                    let protectedAppStatusLine = "cannot automate \(blockedBundleIdentifier) — protected app"
+                    await MainActor.run {
+                        onStatusUpdate(protectedAppStatusLine)
+                    }
                 }
 
                 var toolResultContent: Any

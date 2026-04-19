@@ -366,8 +366,8 @@ final class CursorBubbleConsentPromptController {
             return true
         }
         // Keycode 53 is Escape — rejects mid-stream too, matching mouse
-        // behavior where the No button appears after streaming but users
-        // can also abort by clicking outside intent anytime.
+        // behavior where the Yes/No row appears after streaming; users can
+        // also abort anytime (Escape / N / outside click).
         if keyCode == 53 {
             handleRejectButtonTapped()
             return true
@@ -678,15 +678,6 @@ struct CursorBubbleConsentView: View {
 
     private var inlineButtonsRow: some View {
         HStack(spacing: 6) {
-            Button(action: onRejectButtonTapped) {
-                Text("No")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(CursorBubbleConsentButtonStyle(variant: .secondary))
-            .keyboardShortcut("n", modifiers: [])
-            .keyboardShortcut(.escape, modifiers: [])
-            .accessibilityLabel("Decline automation")
-
             Button(action: onAcceptButtonTapped) {
                 Text("Yes")
                     .font(.system(size: 11, weight: .semibold))
@@ -695,6 +686,15 @@ struct CursorBubbleConsentView: View {
             .keyboardShortcut("y", modifiers: [])
             .keyboardShortcut(.return, modifiers: [])
             .accessibilityLabel("Accept automation")
+
+            Button(action: onRejectButtonTapped) {
+                Text("No")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(CursorBubbleConsentButtonStyle(variant: .secondary))
+            .keyboardShortcut("n", modifiers: [])
+            .keyboardShortcut(.escape, modifiers: [])
+            .accessibilityLabel("Decline automation")
         }
         .padding(.leading, 4)
     }
