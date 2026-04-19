@@ -52,6 +52,33 @@ class OverlayWindow: NSWindow {
     }
 }
 
+// MARK: - Overlay Hosting View (selective click-through for draggable explainer pills)
+
+/// NSHostingView subclass used as the content view of every `OverlayWindow`.
+///
+/// The overlay window is normally click-through (`ignoresMouseEvents = true`) so it
+/// never steals mouse events from the app underneath. When the multi-cursor explainer
+/// tool is active the pills need to be draggable, so we flip `ignoresMouseEvents`
+/// off — but we must still pass every click *outside* the pill rects through to the
+/// app below. This subclass achieves that by overriding `hitTest` to return `nil`
+/// (no hit) unless the mouse point is inside one of the registered pill rects.
+///
+/// `interactivePillRects` is refreshed from SwiftUI via a PreferenceKey (see
+/// `InteractivePillRectsKey`) each time pill layout changes.
+final class OverlayHostingView<Content: View>: NSHostingView<Content> {
+    /// Rectangles (in this view's coordinate space) where mouse events should be
+    /// captured instead of falling through to the app below. Everything outside
+    /// these rects stays click-through.
+    var interactivePillRects: [CGRect] = []
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        for pillRect in interactivePillRects where pillRect.contains(point) {
+            return super.hitTest(point)
+        }
+        return nil
+    }
+}
+
 // MARK: - Legacy triangle cursor (replaced by `Image("claudeCursor")`; kept for reference)
 //
 // Cursor-like triangle shape (equilateral)
@@ -87,6 +114,38 @@ struct NavigationBubbleSizePreferenceKey: PreferenceKey {
     }
 }
 
+/// Per-pill measured sizes keyed by explainer element id. Each
+/// `ExplainerCursorMarker` publishes its rendered pill size so the group-level
+/// layout resolver can lay out real (not estimated) rectangles.
+struct PillSizePreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGSize] = [:]
+    static func reduce(value: inout [UUID: CGSize], nextValue: () -> [UUID: CGSize]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+/// Per-pill on-screen rects (in the overlay's coordinate space). `BlueCursorView`
+/// collects these and forwards them to `OverlayHostingView.interactivePillRects`
+/// so only the pills — not the surrounding transparent overlay — capture mouse
+/// events while a group is active.
+struct InteractivePillRectsPreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+/// User-committed drag translation per pill. When the user drags a pill, the
+/// marker records the final translation (relative to the resolver's computed
+/// center) in its own `@State` and publishes it up so the resolver can treat
+/// that pill as a fixed rectangle and flow other pills around it.
+struct PinnedPillOffsetsPreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGSize] = [:]
+    static func reduce(value: inout [UUID: CGSize], nextValue: () -> [UUID: CGSize]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
 /// The buddy's behavioral mode. Controls whether it follows the cursor,
 /// is flying toward a detected UI element, or is pointing at an element.
 enum BuddyNavigationMode {
@@ -108,14 +167,41 @@ struct BlueCursorView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
     @ObservedObject var companionManager: CompanionManager
+    /// Called whenever the on-screen rects for draggable explainer pills change.
+    /// `OverlayWindow` wires this into `OverlayHostingView.interactivePillRects`
+    /// so mouse events are captured only inside the pills (click-through stays
+    /// intact everywhere else).
+    let onInteractivePillRectsChanged: ([CGRect]) -> Void
+    /// Called when the explainer group presence flips (nil <-> non-nil).
+    /// `OverlayWindow` uses this to toggle `window.ignoresMouseEvents` so the
+    /// overlay only captures mouse events while pills are actually visible.
+    let onExplainerGroupPresenceChanged: (Bool) -> Void
 
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
 
-    init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
+    /// Real pill sizes reported by each `ExplainerCursorMarker` via
+    /// `PillSizePreferenceKey`. The layout resolver uses these for accurate
+    /// overlap detection; before a measurement arrives it falls back to a
+    /// character-count estimate.
+    @State private var measuredExplainerPillSizesById: [UUID: CGSize] = [:]
+    /// Per-pill drag translations committed by the user (relative to the
+    /// resolver's computed center). Flowing these back into the resolver lets
+    /// other pills flow around a pinned pill while the pinned pill stays put.
+    @State private var userPinnedPillOffsetsById: [UUID: CGSize] = [:]
+
+    init(
+        screenFrame: CGRect,
+        isFirstAppearance: Bool,
+        companionManager: CompanionManager,
+        onInteractivePillRectsChanged: @escaping ([CGRect]) -> Void = { _ in },
+        onExplainerGroupPresenceChanged: @escaping (Bool) -> Void = { _ in }
+    ) {
         self.screenFrame = screenFrame
         self.isFirstAppearance = isFirstAppearance
         self.companionManager = companionManager
+        self.onInteractivePillRectsChanged = onInteractivePillRectsChanged
+        self.onExplainerGroupPresenceChanged = onExplainerGroupPresenceChanged
 
         // Seed the cursor position from the current mouse location so the
         // buddy doesn't flash at (0,0) before onAppear fires.
@@ -415,7 +501,9 @@ struct BlueCursorView: View {
             }
 
             // Multi-cursor explainer overlay. Sub-cursors spawn from the
-            // main cursor and fly to their targets simultaneously.
+            // main cursor and fly to their targets simultaneously. Pill
+            // positions are computed once per render by a group-level
+            // resolver that de-overlaps and clamps them inside the screen.
             if let explainerGroup = companionManager.activeExplainerCursorGroup {
                 let elementsOnThisScreen = explainerGroup.elements.filter { element in
                     screenFrame.contains(CGPoint(
@@ -423,21 +511,56 @@ struct BlueCursorView: View {
                         y: element.screenLocation.y
                     ))
                 }
+                let overlayBoundsInSwiftUI = CGRect(
+                    origin: .zero,
+                    size: CGSize(width: screenFrame.width, height: screenFrame.height)
+                )
+                let resolvedPillLayoutsById = resolveExplainerPillLayouts(
+                    elementsOnThisScreen: elementsOnThisScreen,
+                    overlayBoundsInSwiftUI: overlayBoundsInSwiftUI
+                )
                 ForEach(Array(elementsOnThisScreen.enumerated()), id: \.element.id) { index, element in
+                    let targetPositionInSwiftUI = convertScreenPointToSwiftUICoordinates(
+                        element.screenLocation
+                    )
+                    // Fall back to the cursor's target position if the resolver
+                    // hasn't produced a layout yet on the first render frame.
+                    let resolvedPillCenter = resolvedPillLayoutsById[element.id]?.pillCenterInSwiftUI
+                        ?? targetPositionInSwiftUI
                     ExplainerCursorMarker(
                         element: element,
                         mainCursorPositionInSwiftUI: cursorPosition,
-                        targetPositionInSwiftUI: convertScreenPointToSwiftUICoordinates(
-                            element.screenLocation
-                        ),
-                        overlayBoundsInSwiftUI: CGRect(
-                            origin: .zero,
-                            size: CGSize(width: screenFrame.width, height: screenFrame.height)
-                        ),
+                        targetPositionInSwiftUI: targetPositionInSwiftUI,
+                        resolvedPillCenterInSwiftUI: resolvedPillCenter,
                         staggerIndex: index,
                         isReturningToMain: companionManager.isExplainerGroupReturning
                     )
                 }
+            }
+        }
+        .onPreferenceChange(PillSizePreferenceKey.self) { sizesById in
+            measuredExplainerPillSizesById = sizesById
+        }
+        .onPreferenceChange(PinnedPillOffsetsPreferenceKey.self) { offsetsById in
+            userPinnedPillOffsetsById = offsetsById
+        }
+        .onPreferenceChange(InteractivePillRectsPreferenceKey.self) { rectsById in
+            // Forward rects up to the NSHostingView subclass so its hitTest
+            // override can pass clicks through everywhere except on a pill.
+            onInteractivePillRectsChanged(Array(rectsById.values))
+        }
+        .onChange(of: companionManager.activeExplainerCursorGroup?.createdAt) { newCreatedAt in
+            // Presence flip — hosting window toggles ignoresMouseEvents so the
+            // overlay only captures events while pills are visible. We key on
+            // `createdAt` (a Date) since `ExplainerCursorGroup` isn't Equatable.
+            onExplainerGroupPresenceChanged(newCreatedAt != nil)
+            if newCreatedAt == nil {
+                // Group dismissed — clear stale layout inputs so the next group
+                // starts clean (pinned offsets are also cleared when the marker
+                // views are destroyed).
+                measuredExplainerPillSizesById = [:]
+                userPinnedPillOffsetsById = [:]
+                onInteractivePillRectsChanged([])
             }
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
@@ -604,6 +727,36 @@ struct BlueCursorView: View {
         let x = screenPoint.x - screenFrame.origin.x
         let y = (screenFrame.origin.y + screenFrame.height) - screenPoint.y
         return CGPoint(x: x, y: y)
+    }
+
+    // MARK: - Explainer Pill Layout
+
+    /// Build `ExplainerPillLayoutResolver` inputs from the filtered elements
+    /// and invoke the resolver. Runs on every render pass — SwiftUI re-runs
+    /// this automatically when measured sizes, pinned offsets, the element
+    /// list, or the cursor position change, so pill positions stay live.
+    private func resolveExplainerPillLayouts(
+        elementsOnThisScreen: [CompanionManager.ExplainerElement],
+        overlayBoundsInSwiftUI: CGRect
+    ) -> [UUID: ExplainerPillLayoutResolver.ResolvedPillLayout] {
+        let resolverInputs: [ExplainerPillLayoutResolver.ElementInput] = elementsOnThisScreen
+            .enumerated()
+            .map { index, element in
+                ExplainerPillLayoutResolver.ElementInput(
+                    id: element.id,
+                    staggerIndex: index,
+                    cursorPositionInSwiftUI: convertScreenPointToSwiftUICoordinates(element.screenLocation),
+                    labelCharacterCount: element.labelText.count,
+                    descriptionCharacterCount: element.descriptionText.count
+                )
+            }
+        let resolver = ExplainerPillLayoutResolver(
+            elementsInput: resolverInputs,
+            overlayBoundsInSwiftUI: overlayBoundsInSwiftUI,
+            measuredPillSizesById: measuredExplainerPillSizesById,
+            userPinnedOffsetsById: userPinnedPillOffsetsById
+        )
+        return resolver.resolve()
     }
 
     // MARK: - Element Navigation
@@ -980,12 +1133,273 @@ private struct PointingTargetMarker: View {
 /// `PointingTargetMarker`, each explainer cursor has its own color, a
 /// two-line label (name + description), and animates from the main
 /// cursor's position to its target (then back when dismissed).
+/// Group-level layout for the multi-cursor explainer pills.
+///
+/// Each `ExplainerCursorMarker` used to compute its own pill offset locally, which
+/// meant pills had no awareness of each other and frequently overlapped. This
+/// resolver runs once per layout pass with the full group's state and returns a
+/// final pill center per element, after:
+///   1. Seeding each pill at the original circular fan-out offset.
+///   2. Clamping every seeded rect inside the screen bounds (all four edges).
+///   3. Running up to 6 greedy overlap-resolution passes that nudge intersecting
+///      pairs apart; pinned pills (user-dragged) are immovable on the receiving
+///      side but still push the others.
+///   4. Re-clamping after every pass.
+///
+/// The resolver is pure — all input is passed in and no internal state is kept.
+/// SwiftUI re-runs it whenever any input changes.
+struct ExplainerPillLayoutResolver {
+    /// Minimum distance in points between a pill's edge and the screen edge.
+    static let screenEdgeMargin: CGFloat = 8
+    /// Estimated pill sizes are used only until the real measurement arrives via
+    /// `PillSizePreferenceKey`. Clamps keep the estimate from going wild when
+    /// labels are extremely short or extremely long.
+    static let minimumEstimatedPillWidth: CGFloat = 60
+    static let maximumEstimatedPillWidth: CGFloat = 220
+
+    /// Input element to lay out.
+    struct ElementInput {
+        let id: UUID
+        let staggerIndex: Int
+        let cursorPositionInSwiftUI: CGPoint
+        /// Character count-based estimate used when the marker hasn't yet
+        /// published its measured size. The estimate is kept conservative so
+        /// overlap resolution doesn't thrash when real sizes arrive.
+        let labelCharacterCount: Int
+        let descriptionCharacterCount: Int
+    }
+
+    /// Output — final pill center in the overlay's SwiftUI coordinate space.
+    struct ResolvedPillLayout {
+        let id: UUID
+        let pillCenterInSwiftUI: CGPoint
+        let pillSizeUsedForLayout: CGSize
+    }
+
+    let elementsInput: [ElementInput]
+    let overlayBoundsInSwiftUI: CGRect
+    let measuredPillSizesById: [UUID: CGSize]
+    let userPinnedOffsetsById: [UUID: CGSize]
+
+    /// Compute final pill centers.
+    func resolve() -> [UUID: ResolvedPillLayout] {
+        guard !elementsInput.isEmpty else { return [:] }
+
+        var workingRectsById: [UUID: CGRect] = [:]
+        var sizeUsedByElementId: [UUID: CGSize] = [:]
+
+        for elementInput in elementsInput {
+            let pillSize = pillSizeForElement(elementInput)
+            sizeUsedByElementId[elementInput.id] = pillSize
+
+            let seededCenter = seedCenterForElement(elementInput, pillSize: pillSize)
+            let clampedCenter = clampCenterInsideScreenBounds(seededCenter, pillSize: pillSize)
+            workingRectsById[elementInput.id] = rectCentered(on: clampedCenter, size: pillSize)
+        }
+
+        let maximumResolutionPasses = 6
+        for _ in 0..<maximumResolutionPasses {
+            let movedAnyPillDuringThisPass = runOneOverlapResolutionPass(
+                workingRectsById: &workingRectsById
+            )
+            guard movedAnyPillDuringThisPass else { break }
+        }
+
+        var resolvedLayouts: [UUID: ResolvedPillLayout] = [:]
+        for elementInput in elementsInput {
+            guard let finalRect = workingRectsById[elementInput.id],
+                  let pillSize = sizeUsedByElementId[elementInput.id] else {
+                continue
+            }
+            resolvedLayouts[elementInput.id] = ResolvedPillLayout(
+                id: elementInput.id,
+                pillCenterInSwiftUI: CGPoint(x: finalRect.midX, y: finalRect.midY),
+                pillSizeUsedForLayout: pillSize
+            )
+        }
+        return resolvedLayouts
+    }
+
+    // MARK: - Seeding
+
+    /// The original circular fan-out offset used before group layout existed.
+    /// We keep this as the seed so visual behavior matches the previous design
+    /// when there are no overlaps to resolve. If the user has dragged the pill,
+    /// the pinned offset replaces the fan-out entirely.
+    private func seedCenterForElement(
+        _ elementInput: ElementInput,
+        pillSize: CGSize
+    ) -> CGPoint {
+        if let userPinnedOffset = userPinnedOffsetsById[elementInput.id] {
+            return CGPoint(
+                x: elementInput.cursorPositionInSwiftUI.x + userPinnedOffset.width,
+                y: elementInput.cursorPositionInSwiftUI.y + userPinnedOffset.height
+            )
+        }
+
+        let staggerIndex = elementInput.staggerIndex
+        let angle = (Double(staggerIndex) * 2.3) - 2.85
+        let radius: CGFloat = 26 + CGFloat(min(staggerIndex, 5)) * 5
+        let offsetX = CGFloat(cos(angle)) * radius + CGFloat(staggerIndex - 3) * 10
+        let offsetY = -36 - CGFloat(min(staggerIndex, 6)) * 5
+        return CGPoint(
+            x: elementInput.cursorPositionInSwiftUI.x + offsetX,
+            y: elementInput.cursorPositionInSwiftUI.y + offsetY
+        )
+    }
+
+    /// Two-phase sizing — real measured size if we have one, otherwise a
+    /// character-count estimate. Estimates are only used during the very first
+    /// render frame; SwiftUI re-runs the resolver as soon as the measurement
+    /// preference fires.
+    private func pillSizeForElement(_ elementInput: ElementInput) -> CGSize {
+        if let measuredPillSize = measuredPillSizesById[elementInput.id],
+           measuredPillSize.width > 0, measuredPillSize.height > 0 {
+            return measuredPillSize
+        }
+
+        let estimatedWidth = min(
+            Self.maximumEstimatedPillWidth,
+            max(
+                Self.minimumEstimatedPillWidth,
+                CGFloat(elementInput.labelCharacterCount) * 6.5
+                    + CGFloat(elementInput.descriptionCharacterCount) * 5.5
+                    + 16
+            )
+        )
+        let estimatedHeight: CGFloat = elementInput.descriptionCharacterCount == 0 ? 22 : 40
+        return CGSize(width: estimatedWidth, height: estimatedHeight)
+    }
+
+    // MARK: - Clamping
+
+    /// Shift `center` so a pill of `pillSize` centered there fits entirely
+    /// inside `overlayBoundsInSwiftUI` with `screenEdgeMargin` padding. Handles
+    /// all four edges — the pre-refactor code only clamped left/right/top.
+    private func clampCenterInsideScreenBounds(
+        _ center: CGPoint,
+        pillSize: CGSize
+    ) -> CGPoint {
+        var clampedCenter = center
+        let halfWidth = pillSize.width / 2
+        let halfHeight = pillSize.height / 2
+        let minimumAllowedCenterX = overlayBoundsInSwiftUI.minX + Self.screenEdgeMargin + halfWidth
+        let maximumAllowedCenterX = overlayBoundsInSwiftUI.maxX - Self.screenEdgeMargin - halfWidth
+        let minimumAllowedCenterY = overlayBoundsInSwiftUI.minY + Self.screenEdgeMargin + halfHeight
+        let maximumAllowedCenterY = overlayBoundsInSwiftUI.maxY - Self.screenEdgeMargin - halfHeight
+
+        if minimumAllowedCenterX <= maximumAllowedCenterX {
+            clampedCenter.x = min(max(clampedCenter.x, minimumAllowedCenterX), maximumAllowedCenterX)
+        }
+        if minimumAllowedCenterY <= maximumAllowedCenterY {
+            clampedCenter.y = min(max(clampedCenter.y, minimumAllowedCenterY), maximumAllowedCenterY)
+        }
+        return clampedCenter
+    }
+
+    private func rectCentered(on center: CGPoint, size: CGSize) -> CGRect {
+        return CGRect(
+            x: center.x - size.width / 2,
+            y: center.y - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    // MARK: - Overlap resolution
+
+    /// One pass of greedy pair-wise overlap resolution. For each intersecting
+    /// pair, compute the minimum translation vector and split the push 50/50
+    /// along the shorter axis. Pinned pills never move themselves. Returns true
+    /// if any pill moved so the caller can early-exit the loop.
+    private func runOneOverlapResolutionPass(
+        workingRectsById: inout [UUID: CGRect]
+    ) -> Bool {
+        var movedAnyPill = false
+        let elementIdsInStaggerOrder = elementsInput
+            .sorted(by: { $0.staggerIndex < $1.staggerIndex })
+            .map { $0.id }
+
+        for leftIndex in 0..<elementIdsInStaggerOrder.count {
+            for rightIndex in (leftIndex + 1)..<elementIdsInStaggerOrder.count {
+                let leftId = elementIdsInStaggerOrder[leftIndex]
+                let rightId = elementIdsInStaggerOrder[rightIndex]
+                guard var leftRect = workingRectsById[leftId],
+                      var rightRect = workingRectsById[rightId] else { continue }
+                guard leftRect.intersects(rightRect) else { continue }
+
+                let leftIsPinned = userPinnedOffsetsById[leftId] != nil
+                let rightIsPinned = userPinnedOffsetsById[rightId] != nil
+                // Both pinned — nothing we can move. The user wanted it this way.
+                if leftIsPinned && rightIsPinned { continue }
+
+                let overlapWidth = min(leftRect.maxX, rightRect.maxX) - max(leftRect.minX, rightRect.minX)
+                let overlapHeight = min(leftRect.maxY, rightRect.maxY) - max(leftRect.minY, rightRect.minY)
+                // Minimum translation vector — push along the axis with the smaller overlap.
+                let pushAlongX = overlapWidth < overlapHeight
+                let leftCenterIsToTheLeftOfRight = leftRect.midX < rightRect.midX
+                let leftCenterIsAboveRight = leftRect.midY < rightRect.midY
+                var leftDeltaX: CGFloat = 0
+                var leftDeltaY: CGFloat = 0
+                var rightDeltaX: CGFloat = 0
+                var rightDeltaY: CGFloat = 0
+
+                if pushAlongX {
+                    let signedPush: CGFloat = leftCenterIsToTheLeftOfRight ? -overlapWidth : overlapWidth
+                    leftDeltaX = signedPush / 2
+                    rightDeltaX = -signedPush / 2
+                } else {
+                    let signedPush: CGFloat = leftCenterIsAboveRight ? -overlapHeight : overlapHeight
+                    leftDeltaY = signedPush / 2
+                    rightDeltaY = -signedPush / 2
+                }
+
+                // Route the entire push to the non-pinned side so pinned pills stay put.
+                if leftIsPinned {
+                    rightDeltaX += leftDeltaX
+                    rightDeltaY += leftDeltaY
+                    leftDeltaX = 0
+                    leftDeltaY = 0
+                } else if rightIsPinned {
+                    leftDeltaX += rightDeltaX
+                    leftDeltaY += rightDeltaY
+                    rightDeltaX = 0
+                    rightDeltaY = 0
+                }
+
+                if leftDeltaX != 0 || leftDeltaY != 0 {
+                    leftRect = leftRect.offsetBy(dx: leftDeltaX, dy: leftDeltaY)
+                    let reClampedLeftCenter = clampCenterInsideScreenBounds(
+                        CGPoint(x: leftRect.midX, y: leftRect.midY),
+                        pillSize: leftRect.size
+                    )
+                    leftRect = rectCentered(on: reClampedLeftCenter, size: leftRect.size)
+                    workingRectsById[leftId] = leftRect
+                    movedAnyPill = true
+                }
+                if rightDeltaX != 0 || rightDeltaY != 0 {
+                    rightRect = rightRect.offsetBy(dx: rightDeltaX, dy: rightDeltaY)
+                    let reClampedRightCenter = clampCenterInsideScreenBounds(
+                        CGPoint(x: rightRect.midX, y: rightRect.midY),
+                        pillSize: rightRect.size
+                    )
+                    rightRect = rectCentered(on: reClampedRightCenter, size: rightRect.size)
+                    workingRectsById[rightId] = rightRect
+                    movedAnyPill = true
+                }
+            }
+        }
+        return movedAnyPill
+    }
+}
+
 private struct ExplainerCursorMarker: View {
     let element: CompanionManager.ExplainerElement
     let mainCursorPositionInSwiftUI: CGPoint
     let targetPositionInSwiftUI: CGPoint
-    /// Local SwiftUI bounds for this overlay (origin 0,0 size = screen).
-    let overlayBoundsInSwiftUI: CGRect
+    /// Pill center resolved by the group-level `ExplainerPillLayoutResolver`.
+    /// Already de-overlapped and clamped inside the screen bounds.
+    let resolvedPillCenterInSwiftUI: CGPoint
     let staggerIndex: Int
     let isReturningToMain: Bool
 
@@ -993,46 +1407,41 @@ private struct ExplainerCursorMarker: View {
     @State private var markerScale: CGFloat = 0.3
     @State private var markerOpacity: Double = 0.0
 
+    /// Drag translation committed when the user releases a drag. Once set, the
+    /// pill stays at `resolvedPillCenter + userPinnedTranslation` until the
+    /// group dismisses (which destroys this view and its @State with it).
+    @State private var userPinnedTranslation: CGSize? = nil
+    /// Live drag translation during an in-progress drag. Reset to .zero when
+    /// the gesture ends (the final value is folded into `userPinnedTranslation`).
+    @GestureState private var activeDragTranslation: CGSize = .zero
+
     private let cursorImageSize: CGFloat = 20
     private let spawnStaggerSeconds: Double = 0.12
     private let returnStaggerSeconds: Double = 0.08
 
-    private var currentPosition: CGPoint {
+    private var currentCursorPosition: CGPoint {
         if isReturningToMain {
             return mainCursorPositionInSwiftUI
         }
         return hasArrivedAtTarget ? targetPositionInSwiftUI : mainCursorPositionInSwiftUI
     }
 
-    /// Spread pills horizontally and vertically so stacked targets do not overlap labels; nudge away from screen edges.
-    private var pillAnchorOffset: CGPoint {
-        let angle = (Double(staggerIndex) * 2.3) - 2.85
-        let radius: CGFloat = 26 + CGFloat(min(staggerIndex, 5)) * 5
-        var offsetX = CGFloat(cos(angle)) * radius + CGFloat(staggerIndex - 3) * 10
-        let offsetY = -36 - CGFloat(min(staggerIndex, 6)) * 5
-
-        let pillReserveX: CGFloat = 120
-        let proposedX = currentPosition.x + offsetX
-        if proposedX < overlayBoundsInSwiftUI.minX + pillReserveX {
-            offsetX += (overlayBoundsInSwiftUI.minX + pillReserveX) - proposedX
-        } else if proposedX > overlayBoundsInSwiftUI.maxX - pillReserveX {
-            offsetX -= proposedX - (overlayBoundsInSwiftUI.maxX - pillReserveX)
-        }
-
-        let pillReserveTop: CGFloat = 44
-        var adjustedOffsetY = offsetY
-        let proposedY = currentPosition.y + adjustedOffsetY
-        if proposedY < overlayBoundsInSwiftUI.minY + pillReserveTop {
-            adjustedOffsetY += (overlayBoundsInSwiftUI.minY + pillReserveTop) - proposedY
-        }
-
-        return CGPoint(x: offsetX, y: adjustedOffsetY)
+    /// Final on-screen pill center — resolver output plus any committed drag
+    /// translation plus the live translation from an in-progress drag. Used by
+    /// both the pill `.position()` and the connecting line's endpoint, so the
+    /// line follows every drag automatically.
+    private var effectivePillCenterInSwiftUI: CGPoint {
+        let pinnedTranslation = userPinnedTranslation ?? .zero
+        return CGPoint(
+            x: resolvedPillCenterInSwiftUI.x + pinnedTranslation.width + activeDragTranslation.width,
+            y: resolvedPillCenterInSwiftUI.y + pinnedTranslation.height + activeDragTranslation.height
+        )
     }
 
     /// Cursor asset points roughly up-left by default; rotate so the tip aims at the explainer target.
     private var cursorRotationTowardTargetDegrees: Double {
-        let dx = targetPositionInSwiftUI.x - currentPosition.x
-        let dy = targetPositionInSwiftUI.y - currentPosition.y
+        let dx = targetPositionInSwiftUI.x - currentCursorPosition.x
+        let dy = targetPositionInSwiftUI.y - currentCursorPosition.y
         guard abs(dx) + abs(dy) > 2 else { return -35 }
         let radians = atan2(Double(dy), Double(dx))
         return radians * 180 / .pi - 55
@@ -1041,12 +1450,27 @@ private struct ExplainerCursorMarker: View {
     var body: some View {
         ZStack {
             if !element.labelText.isEmpty {
-                let pillCenter = CGPoint(
-                    x: currentPosition.x + pillAnchorOffset.x,
-                    y: currentPosition.y + pillAnchorOffset.y
-                )
-                let estimatedPillHalfHeight: CGFloat = 28
+                let pillCenter = effectivePillCenterInSwiftUI
 
+                // The connecting line is drawn first so the pill sits on top.
+                // The line runs from the pill's bottom edge to the sub-cursor;
+                // because both endpoints live in the same coordinate space and
+                // `pillCenter` already includes the live drag translation, the
+                // line follows the pill through every drag.
+                let estimatedPillHalfHeight: CGFloat = 28
+                Path { path in
+                    path.move(to: CGPoint(x: pillCenter.x, y: pillCenter.y + estimatedPillHalfHeight))
+                    path.addLine(to: currentCursorPosition)
+                }
+                .stroke(element.assignedColor.opacity(0.55), lineWidth: 1.5)
+                .opacity(markerOpacity * 0.95)
+                .allowsHitTesting(false)
+
+                // The pill itself — the only interactive part of the marker.
+                // A GeometryReader in .background measures its rendered size so
+                // the resolver can lay out real (not estimated) rectangles;
+                // another GeometryReader publishes the pill's on-screen rect so
+                // the hosting view's hitTest only captures clicks on the pill.
                 VStack(alignment: .leading, spacing: 2) {
                     Text(element.labelText)
                         .font(.system(size: 11, weight: .semibold))
@@ -1069,16 +1493,16 @@ private struct ExplainerCursorMarker: View {
                         )
                 )
                 .fixedSize()
+                .background(pillSizeMeasurementReporter)
+                .background(pillInteractiveRectReporter(pillCenter: pillCenter))
+                .preference(
+                    key: PinnedPillOffsetsPreferenceKey.self,
+                    value: userPinnedTranslation.map { [element.id: $0] } ?? [:]
+                )
                 .scaleEffect(markerScale)
                 .opacity(markerOpacity)
                 .position(x: pillCenter.x, y: pillCenter.y)
-
-                Path { path in
-                    path.move(to: CGPoint(x: pillCenter.x, y: pillCenter.y + estimatedPillHalfHeight))
-                    path.addLine(to: currentPosition)
-                }
-                .stroke(element.assignedColor.opacity(0.55), lineWidth: 1.5)
-                .opacity(markerOpacity * 0.95)
+                .gesture(pillDragGesture)
             }
 
             Image("claudeCursor")
@@ -1091,9 +1515,9 @@ private struct ExplainerCursorMarker: View {
                 .shadow(color: element.assignedColor.opacity(0.7), radius: 8, x: 0, y: 0)
                 .scaleEffect(markerScale)
                 .opacity(markerOpacity)
-                .position(currentPosition)
+                .position(currentCursorPosition)
+                .allowsHitTesting(false)
         }
-        .allowsHitTesting(false)
         .onAppear {
             let delay = Double(staggerIndex) * spawnStaggerSeconds
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -1114,7 +1538,56 @@ private struct ExplainerCursorMarker: View {
                 }
             }
         }
-        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: currentPosition)
+        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: currentCursorPosition)
+        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: resolvedPillCenterInSwiftUI)
+    }
+
+    /// Drag gesture for repositioning the pill. `minimumDistance: 2` lets a
+    /// sloppy click still feel intentional. During the drag the translation
+    /// flows through `activeDragTranslation` (auto-resets when the gesture
+    /// ends); on release we commit the final translation into the persistent
+    /// `userPinnedTranslation`, additively so repeated drags accumulate.
+    private var pillDragGesture: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .updating($activeDragTranslation) { dragValue, liveTranslation, _ in
+                liveTranslation = dragValue.translation
+            }
+            .onEnded { dragValue in
+                let previousPinnedTranslation = userPinnedTranslation ?? .zero
+                userPinnedTranslation = CGSize(
+                    width: previousPinnedTranslation.width + dragValue.translation.width,
+                    height: previousPinnedTranslation.height + dragValue.translation.height
+                )
+            }
+    }
+
+    /// Publishes the pill's real rendered size up to `BlueCursorView` so the
+    /// group-level resolver can lay out actual rectangles instead of estimates.
+    private var pillSizeMeasurementReporter: some View {
+        GeometryReader { geometryProxy in
+            Color.clear.preference(
+                key: PillSizePreferenceKey.self,
+                value: [element.id: geometryProxy.size]
+            )
+        }
+    }
+
+    /// Publishes the pill's on-screen rect (centered on `pillCenter` with the
+    /// measured size) so `OverlayHostingView.hitTest` can capture mouse events
+    /// inside the pill and pass everything else through to the app below.
+    private func pillInteractiveRectReporter(pillCenter: CGPoint) -> some View {
+        GeometryReader { geometryProxy in
+            let rectCenteredOnPill = CGRect(
+                x: pillCenter.x - geometryProxy.size.width / 2,
+                y: pillCenter.y - geometryProxy.size.height / 2,
+                width: geometryProxy.size.width,
+                height: geometryProxy.size.height
+            )
+            Color.clear.preference(
+                key: InteractivePillRectsPreferenceKey.self,
+                value: [element.id: rectCenteredOnPill]
+            )
+        }
     }
 }
 
@@ -1208,14 +1681,36 @@ class OverlayWindowManager {
         for screen in screens {
             let window = OverlayWindow(screen: screen)
 
+            // Weak references break the retention cycle between the hosting
+            // view and the callbacks buried in its SwiftUI root view. The
+            // window retains the hosting view (as its contentView) and the
+            // `overlayWindows` array retains the window, so weak captures here
+            // are safe — the window owns the real lifetime.
+            weak var weakHostingView: OverlayHostingView<BlueCursorView>?
+            weak var weakWindow: OverlayWindow? = window
+
             let contentView = BlueCursorView(
                 screenFrame: screen.frame,
                 isFirstAppearance: isFirstAppearance,
-                companionManager: companionManager
+                companionManager: companionManager,
+                onInteractivePillRectsChanged: { interactivePillRects in
+                    // Passing rects into the hosting view lets its hitTest
+                    // capture mouse events only inside pills; outside the
+                    // pills the overlay remains click-through.
+                    weakHostingView?.interactivePillRects = interactivePillRects
+                },
+                onExplainerGroupPresenceChanged: { explainerGroupIsActive in
+                    // When an explainer group is active we need pills to
+                    // accept drag gestures; when idle the overlay goes back to
+                    // fully click-through so no clicks are ever stolen from
+                    // the app underneath.
+                    weakWindow?.ignoresMouseEvents = !explainerGroupIsActive
+                }
             )
 
-            let hostingView = NSHostingView(rootView: contentView)
+            let hostingView = OverlayHostingView(rootView: contentView)
             hostingView.frame = screen.frame
+            weakHostingView = hostingView
             window.contentView = hostingView
 
             overlayWindows.append(window)
