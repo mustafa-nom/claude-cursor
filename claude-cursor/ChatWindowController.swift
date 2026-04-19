@@ -20,9 +20,15 @@ import SwiftUI
 final class ChatWindowController {
 
     private var chatPanel: NSPanel?
+    /// AppKit does not retain `NSWindow.delegate`; keep the delegate alive
+    /// so `windowWillClose` runs when the user closes the panel with the red X.
+    private var chatPanelCloseDelegate: ChatPanelDelegate?
     private weak var companionManager: CompanionManager?
-    private let panelWidth: CGFloat = 360
-    private let panelHeight: CGFloat = 520
+    /// Initial size when the panel is first created; user resize is preserved across hide/show.
+    private let defaultPanelWidth: CGFloat = 360
+    private let defaultPanelHeight: CGFloat = 520
+    private let minimumPanelWidth: CGFloat = 328
+    private let minimumPanelHeight: CGFloat = 440
 
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
@@ -31,10 +37,11 @@ final class ChatWindowController {
     /// Shows the chat panel. Creates it on first call, makes it visible on
     /// subsequent calls. Positioned in the bottom-right of the primary screen.
     func showChatPanel() {
-        if chatPanel == nil {
+        let didCreatePanel = (chatPanel == nil)
+        if didCreatePanel {
             createChatPanel()
+            positionNewPanelInBottomRightWithDefaultSize()
         }
-        positionPanelInBottomRight()
         chatPanel?.makeKeyAndOrderFront(nil)
         chatPanel?.orderFrontRegardless()
     }
@@ -55,13 +62,18 @@ final class ChatWindowController {
         guard let companionManager else { return }
 
         let chatView = ChatTranscriptView(companionManager: companionManager)
-            .frame(width: panelWidth, height: panelHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         let hostingView = NSHostingView(rootView: chatView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
+        hostingView.autoresizingMask = [.width, .height]
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: defaultPanelWidth,
+                height: defaultPanelHeight
+            ),
             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -79,33 +91,41 @@ final class ChatWindowController {
         panel.isMovableByWindowBackground = true
         panel.titlebarAppearsTransparent = true
         panel.titleVisibility = .visible
-        panel.minSize = NSSize(width: 300, height: 400)
+        panel.minSize = NSSize(width: minimumPanelWidth, height: minimumPanelHeight)
         panel.contentView = hostingView
 
         // When the user closes via the title bar X, toggle the setting off.
-        // Dispatch async so the @Published update lands on a clean runloop tick
-        // after the NSWindow teardown completes — otherwise SwiftUI's observed
-        // refresh can race with the window close and the menu bar Toggle stays
-        // visually "on" even though the underlying state is false.
-        panel.delegate = ChatPanelDelegate(onClose: { [weak companionManager] in
-            DispatchQueue.main.async {
+        // Retain the delegate on `self` (see `chatPanelCloseDelegate`); assigning
+        // only to `panel.delegate` would let ARC release it immediately.
+        let closeDelegate = ChatPanelDelegate(onClose: { [weak companionManager] in
+            Task { @MainActor in
                 companionManager?.setShowChatEnabled(false)
             }
         })
+        chatPanelCloseDelegate = closeDelegate
+        panel.delegate = closeDelegate
 
         chatPanel = panel
     }
 
-    private func positionPanelInBottomRight() {
+    /// Places a newly created panel in the bottom-right of the primary screen
+    /// using the default width and height. Does not run on subsequent
+    /// `showChatPanel` calls so the user keeps their resized frame.
+    private func positionNewPanelInBottomRightWithDefaultSize() {
         guard let panel = chatPanel,
               let screen = NSScreen.main else { return }
 
         let screenFrame = screen.visibleFrame
-        let panelOriginX = screenFrame.maxX - panelWidth - 20
+        let panelOriginX = screenFrame.maxX - defaultPanelWidth - 20
         let panelOriginY = screenFrame.minY + 20
 
         panel.setFrame(
-            NSRect(x: panelOriginX, y: panelOriginY, width: panelWidth, height: panelHeight),
+            NSRect(
+                x: panelOriginX,
+                y: panelOriginY,
+                width: defaultPanelWidth,
+                height: defaultPanelHeight
+            ),
             display: true
         )
     }
@@ -267,23 +287,58 @@ struct ChatMessageBubble: View {
     let messageIndex: Int
 
     var body: some View {
-        HStack {
-            if role == .user { Spacer(minLength: 40) }
-
-            Text(text)
-                .font(.system(size: 13))
-                .foregroundColor(role == .user ? DS.Colors.textPrimary : DS.Colors.textPrimary.opacity(0.92))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.large)
-                        .fill(bubbleBackgroundColor)
-                )
-                .textSelection(.enabled)
-
-            if role == .assistant { Spacer(minLength: 40) }
+        Group {
+            switch role {
+            case .user:
+                HStack(alignment: .top, spacing: 0) {
+                    Spacer(minLength: 40)
+                    bubbleCore
+                }
+            case .assistant:
+                HStack(alignment: .top, spacing: 0) {
+                    bubbleCore
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Spacer(minLength: 40)
+                }
+            }
         }
         .id("\(role)-\(messageIndex)")
+    }
+
+    private var bubbleCore: some View {
+        Group {
+            switch role {
+            case .user:
+                Text(text)
+                    .font(.system(size: 13))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .textSelection(.enabled)
+            case .assistant:
+                assistantBubbleInner
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .fill(bubbleBackgroundColor)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var assistantBubbleInner: some View {
+        if RichMarkdownContent.containsLaTeXOrFencedCode(rawText: text) {
+            ChatAssistantMathJaxBubble(markdownText: text)
+        } else {
+            Text(RichMarkdownContent.attributedStringFromMarkdownLossy(rawText: text))
+                .font(.system(size: 13, weight: .regular))
+                .foregroundColor(DS.Colors.textPrimary.opacity(0.92))
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
     }
 
     private var bubbleBackgroundColor: Color {
@@ -293,5 +348,21 @@ struct ChatMessageBubble: View {
         case .assistant:
             return DS.Colors.surface2
         }
+    }
+}
+
+/// Sizes the MathJax web view to the rendered document height so the transcript
+/// `ScrollView` scrolls as a whole instead of nesting a scroll area inside the bubble.
+private struct ChatAssistantMathJaxBubble: View {
+    let markdownText: String
+    @State private var measuredContentHeight: CGFloat = 96
+
+    var body: some View {
+        MathJaxMarkdownWebView(
+            responseText: markdownText,
+            reportContentHeight: $measuredContentHeight
+        )
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+        .frame(height: max(96, measuredContentHeight))
     }
 }

@@ -32,7 +32,6 @@
 import AppKit
 import Combine
 import SwiftUI
-import WebKit
 
 // MARK: - Answer Panel Controller
 
@@ -55,11 +54,23 @@ final class AnswerPanelController {
     /// Margin from the edge of the screen when positioning the panel.
     private let screenEdgeMargin: CGFloat = 20
 
+    /// Markdown last written to the panel during the current assistant turn
+    /// (`open_answer_panel` or router `.answer`). Cleared by
+    /// `resetMarkdownTrackingForNewTurn()` so chat history can mirror the
+    /// panel even when streamed `fullResponseText` omits tool payloads.
+    private(set) var markdownLastPresentedThisTurn: String?
+
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
     }
 
     // MARK: - Public API
+
+    /// Clears per-turn panel markdown tracking. Call when starting a new
+    /// vision/tool turn alongside `CompanionToolRegistry.beginTurn`.
+    func resetMarkdownTrackingForNewTurn() {
+        markdownLastPresentedThisTurn = nil
+    }
 
     /// Shows the answer panel with the given response text. Creates the panel
     /// on first call, reuses it on subsequent calls. The panel renders the
@@ -68,6 +79,7 @@ final class AnswerPanelController {
         let cleanedResponseText = ClipboardManager.stripInternalCoordinationTags(
             from: responseText
         )
+        markdownLastPresentedThisTurn = cleanedResponseText
         answerPanelViewModel.responseText = cleanedResponseText
 
         if answerPanel == nil {
@@ -238,18 +250,18 @@ struct AnswerPanelView: View {
 
     /// Chooses the rich content renderer. When the response includes LaTeX
     /// markers or fenced code blocks, we render via WKWebView with MathJax
-    /// and Prism so equations and syntax highlighting work. For plain
+    /// and marked.js. For plain
     /// markdown without math or fenced code, the native AttributedString
     /// path is kept — faster render, no web view spin-up cost.
     private var scrollableResponseContent: some View {
         Group {
-            if containsLaTeXOrFencedCode(rawText: viewModel.responseText) {
-                MathJaxAnswerWebView(responseText: viewModel.responseText)
+            if RichMarkdownContent.containsLaTeXOrFencedCode(rawText: viewModel.responseText) {
+                MathJaxMarkdownWebView(responseText: viewModel.responseText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 8)
             } else {
                 ScrollView(.vertical, showsIndicators: true) {
-                    Text(markdownAttributedString)
+                    Text(RichMarkdownContent.attributedStringFromMarkdownLossy(rawText: viewModel.responseText))
                         .font(.system(size: 13, weight: .regular))
                         .foregroundColor(DS.Colors.textPrimary)
                         .lineSpacing(4)
@@ -261,176 +273,5 @@ struct AnswerPanelView: View {
                 }
             }
         }
-    }
-
-    /// Returns true when the response text looks like it would benefit
-    /// from the richer web-view renderer. Detection is intentionally loose:
-    /// false positives just swap renderers (both show the same content),
-    /// whereas false negatives mean the user sees raw `$$...$$` instead of
-    /// typeset math.
-    private func containsLaTeXOrFencedCode(rawText: String) -> Bool {
-        if rawText.contains("$$") { return true }
-        if rawText.contains("\\(") && rawText.contains("\\)") { return true }
-        if rawText.contains("\\[") && rawText.contains("\\]") { return true }
-        if rawText.contains("```") { return true }
-        return false
-    }
-
-    /// Builds an `AttributedString` from the response text, parsing it as
-    /// markdown. Falls back to a plain-text AttributedString if markdown
-    /// parsing fails (e.g. malformed input) so the user always sees the
-    /// response content, even if formatting is lost.
-    private var markdownAttributedString: AttributedString {
-        let rawText = viewModel.responseText
-        guard !rawText.isEmpty else {
-            return AttributedString("")
-        }
-
-        let markdownParsingOptions = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-
-        if let parsedAttributedString = try? AttributedString(
-            markdown: rawText,
-            options: markdownParsingOptions
-        ) {
-            return parsedAttributedString
-        }
-
-        return AttributedString(rawText)
-    }
-}
-
-// MARK: - MathJax Answer Web View
-
-/// WKWebView-backed SwiftUI view that renders a response with markdown,
-/// fenced-code syntax highlighting, and LaTeX math. Used by the answer
-/// panel when the response contains math markers (`$$`, `\(...\)`, `\[...\]`)
-/// or fenced code blocks — cases where the native AttributedString renderer
-/// loses fidelity.
-///
-/// We use CDN-hosted MathJax and marked.js here because bundling them
-/// would balloon the app size and the answer panel is only shown when the
-/// user is actively asking a question (i.e., online). If the user is
-/// offline and triggers math, the view gracefully falls back to raw
-/// markdown text.
-private struct MathJaxAnswerWebView: NSViewRepresentable {
-    let responseText: String
-
-    func makeNSView(context: Context) -> WKWebView {
-        let webViewConfiguration = WKWebViewConfiguration()
-        webViewConfiguration.suppressesIncrementalRendering = true
-
-        let mathJaxWebView = WKWebView(
-            frame: .zero,
-            configuration: webViewConfiguration
-        )
-        mathJaxWebView.setValue(false, forKey: "drawsBackground")
-        mathJaxWebView.loadHTMLString(
-            buildMathJaxHTMLShell(forResponseText: responseText),
-            baseURL: nil
-        )
-        return mathJaxWebView
-    }
-
-    func updateNSView(_ mathJaxWebView: WKWebView, context: Context) {
-        mathJaxWebView.loadHTMLString(
-            buildMathJaxHTMLShell(forResponseText: responseText),
-            baseURL: nil
-        )
-    }
-
-    /// Returns an HTML document that renders the response via marked.js for
-    /// markdown, Prism for syntax highlighting, and MathJax for LaTeX. The
-    /// body styling matches the answer panel's dark aesthetic.
-    private func buildMathJaxHTMLShell(forResponseText responseText: String) -> String {
-        // Escape the response text for safe inclusion inside a <script>
-        // JS template literal — backslashes, backticks, `${` interpolation,
-        // and `</` (for script-tag breakouts) would otherwise break parsing.
-        // Only the `${` interpolation sequence is escaped — bare `$` (and
-        // `$$`) must pass through so MathJax sees its configured display
-        // delimiter. Escaping every `$` turns `$$x=1$$` into `\$\$x=1\$\$`
-        // and MathJax silently renders the raw text.
-        let escapedResponseText = responseText
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "`", with: "\\`")
-            .replacingOccurrences(of: "${", with: "\\${")
-            .replacingOccurrences(of: "</", with: "<\\/")
-
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <style>
-            html, body {
-                margin: 0;
-                padding: 14px 16px;
-                background: transparent;
-                color: rgba(255,255,255,0.92);
-                font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-                line-height: 1.55;
-                -webkit-font-smoothing: antialiased;
-            }
-            h1, h2, h3 { margin: 0.8em 0 0.4em 0; color: rgba(255,255,255,0.98); }
-            h1 { font-size: 1.25em; }
-            h2 { font-size: 1.12em; }
-            h3 { font-size: 1.02em; font-weight: 600; }
-            p { margin: 0.4em 0; }
-            ul, ol { margin: 0.4em 0; padding-left: 1.3em; }
-            li { margin: 0.15em 0; }
-            code {
-                font-family: "SF Mono", Menlo, Consolas, monospace;
-                font-size: 0.92em;
-                background: rgba(255,255,255,0.08);
-                padding: 1px 5px;
-                border-radius: 4px;
-            }
-            pre {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 6px;
-                padding: 10px 12px;
-                overflow-x: auto;
-                font-size: 0.92em;
-            }
-            pre code {
-                background: transparent;
-                padding: 0;
-            }
-            a { color: #6bb8ff; }
-            blockquote {
-                margin: 0.6em 0;
-                padding: 0.2em 0.9em;
-                border-left: 2px solid rgba(255,255,255,0.2);
-                color: rgba(255,255,255,0.75);
-            }
-            .MathJax { color: rgba(255,255,255,0.95); }
-        </style>
-        <script>
-            window.MathJax = {
-                tex: {
-                    inlineMath: [['\\\\(', '\\\\)']],
-                    displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
-                },
-                svg: { fontCache: 'global' }
-            };
-        </script>
-        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
-        </head>
-        <body>
-        <div id="responseBody"></div>
-        <script>
-            const rawResponseText = `\(escapedResponseText)`;
-            const renderedHTML = marked.parse(rawResponseText, { breaks: true });
-            document.getElementById('responseBody').innerHTML = renderedHTML;
-            if (window.MathJax && window.MathJax.typesetPromise) {
-                window.MathJax.typesetPromise();
-            }
-        </script>
-        </body>
-        </html>
-        """
     }
 }
