@@ -8,9 +8,15 @@ Your AI-native Mac companion that tutors you in any app with voice Q&A, live nav
 
 **Who it is for:** People who learn by doing on a Mac—students, self-taught builders, support-heavy roles, and anyone who wants a patient, voice-first guide that stays beside their work instead of replacing it. It is built for *your* screen and *your* phrasing, not a one-size-fits-all screencast.
 
-## Architecture (short)
+## Architecture (short version)
 
-For the full technical breakdown, read [`CLAUDE.md`](CLAUDE.md). In one sentence: **menu bar SwiftUI + AppKit**, **Worker-proxied** Claude / STT / TTS, **ScreenCaptureKit** vision, **SSE** streaming, optional **Computer Use** and local automation behind **consent**, local **wiki + SQLite** for memory and lessons.
+For the full technical breakdown, read [`CLAUDE.md`](CLAUDE.md). In short:
+- **menu bar SwiftUI + AppKit** — the app shell
+- **Worker-proxied** Claude / STT / TTS — keys never ship in the binary
+- **ScreenCaptureKit** vision — sees your actual screen to ground answers and pointing
+- **SSE** streaming — replies stream in live so the overlay stays responsive
+- optional **Computer Use** + local automation behind **consent**
+- local **wiki + SQLite** for memory and lessons
 
 ## Project structure
 
