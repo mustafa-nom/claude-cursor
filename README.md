@@ -4,9 +4,9 @@ Your AI-native Mac companion that tutors you in any app with voice Q&A, live nav
 
 ## The problem & who it's for
 
-**Problem:** Explaining software or getting unstuck usually means breaking flow—tabbing to a browser, re-describing your screen, or watching a generic tutorial that does not match your layout, monitor count, or exact app state.
+**Problem:** Explaining software or getting unstuck usually means breaking flow-tabbing to a browser, re-describing your screen, or watching a generic tutorial that does not match your layout, monitor count, or exact app state.
 
-**Who it is for:** People who learn by doing on a Mac—students, self-taught builders, support-heavy roles, and anyone who wants a patient, voice-first guide that stays beside their work instead of replacing it. It is built for *your* screen and *your* phrasing, not a one-size-fits-all screencast.
+**Who it is for:** People who learn by doing such as students, self-taught builders, support-heavy roles, and anyone who wants a patient, voice-first guide that stays beside their work instead of replacing it. It is built for *your* screen and *your* phrasing, not a one-size-fits-all screencast.
 
 ## Architecture (short version)
 
@@ -124,6 +124,14 @@ If you want to do it yourself, here's the deal.
 - A [Cloudflare](https://cloudflare.com) account (free tier works)
 - API keys for the Worker (see below): [Anthropic](https://console.anthropic.com), [AssemblyAI](https://www.assemblyai.com), [ElevenLabs](https://elevenlabs.io); plus [OpenAI](https://platform.openai.com) and [Tavily](https://tavily.com) if you use Whisper and wiki web-search routes
 
+### 0. Permissions the app needs
+
+- **Microphone** — for push-to-talk voice capture
+- **Accessibility** — for the global keyboard shortcut (Control + Option)
+- **Screen Recording** — for taking screenshots when you use the hotkey
+- **Screen Content** — for ScreenCaptureKit access
+
+
 ### 1. Set up the Cloudflare Worker
 
 The Worker is a tiny proxy that holds your API keys. The app talks to the Worker, the Worker talks to the APIs. This way your keys never ship in the app binary.
@@ -211,10 +219,3 @@ In Xcode:
 3. Hit **Cmd + R** to build and run
 
 The app will appear in your menu bar (not the dock). Click the icon to open the panel, grant the permissions it asks for, and you're good.
-
-### Permissions the app needs
-
-- **Microphone** — for push-to-talk voice capture
-- **Accessibility** — for the global keyboard shortcut (Control + Option)
-- **Screen Recording** — for taking screenshots when you use the hotkey
-- **Screen Content** — for ScreenCaptureKit access
