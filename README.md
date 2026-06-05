@@ -8,21 +8,47 @@ Your AI-native Mac companion that tutors you in any app with voice Q&A, live nav
 
 **Who it is for:** People who learn by doing on a Mac—students, self-taught builders, support-heavy roles, and anyone who wants a patient, voice-first guide that stays beside their work instead of replacing it. It is built for *your* screen and *your* phrasing, not a one-size-fits-all screencast.
 
-## How your solution works (technical overview)
+## Architecture (short)
 
-Claude Cursor is a **menu bar-only** app (no dock icon): a custom `NSPanel` control surface plus a full-screen, non-activating **cursor overlay** so explanations and pointing never steal focus from the app you are using.
+For the full technical breakdown, read [`CLAUDE.md`](CLAUDE.md). In one sentence: **menu bar SwiftUI + AppKit**, **Worker-proxied** Claude / STT / TTS, **ScreenCaptureKit** vision, **SSE** streaming, optional **Computer Use** and local automation behind **consent**, local **wiki + SQLite** for memory and lessons.
 
-Privacy- and safety-oriented design choices (what we minimized on the device, what still leaves it when you use a feature, and how high-impact actions are gated) are summarized under **[Ethical alignment and responsible use](#ethical-alignment-and-responsible-use)**.
+## Project structure
 
-**Why Claude is core, not bolted on.** The product is *screen-grounded*: companion turns pair what you said with labeled **ScreenCaptureKit** JPEGs (multi-monitor; tutor flows can use **focused-window** capture). Claude does not only return prose—it runs **native tool rounds** (`tool_use` / `tool_result`) so its decisions become **real UI**: cursor flights, labels, answer surfaces, wiki lookups, lesson starts, and the consent-gated path into automation. A local **wiki loop** feeds compressed, queryable memory back into prompts so behavior compounds on *your* Mac over time instead of resetting every session.
+```
+claude-cursor/           # Swift source
+  CompanionManager.swift    # Central state machine
+  CompanionPanelView.swift  # Menu bar panel UI
+  ClaudeAPI.swift           # Claude streaming client
+  ElevenLabsTTSClient.swift # Text-to-speech playback
+  OverlayWindow.swift       # Blue cursor overlay
+  AssemblyAI*.swift         # Real-time transcription
+  BuddyDictation*.swift     # Push-to-talk pipeline
+worker/                  # Cloudflare Worker proxy (`cc-proxy` in wrangler.toml)
+  src/index.ts              # Routes: /chat, /tts, /transcribe-token, /youtube-transcript, /whisper, /web-search, /fetch-url
+CLAUDE.md                # Full architecture doc (agents read this)
+```
 
-**Runtime companion (voice, chat, tools).** **Push-to-talk** (Control + Option) drives a **pluggable transcription** layer (AssemblyAI streaming by default; OpenAI Whisper upload or Apple Speech optional). **Typed chat** uses the same pipeline. Screenshots and text go to **Claude** via the Worker’s **`POST /chat`** proxy (**no API keys in the app binary**). The client uses **SSE** streaming and `ClaudeAPI.analyzeImageStreamingWithTools`: bounded **tool-use iterations** execute **`CompanionToolRegistry`** handlers—e.g. **`point_at_element`**, multi-cursor **`explain_screen_elements`**, **`query_wiki`**, clipboard helpers, **`start_youtube_lesson`**, and automation entry. The in-app model picker targets **Claude Sonnet-class** models by default. **ElevenLabs** TTS (Worker **`POST /tts`**) can read replies aloud.
+## How our solution works (technical overview)
 
-**Every other Claude call site on the critical path.** **Tutor** idle nudges reuse tool streaming with focused-window capture after an inline **yes/no** bubble. **Post-navigation follow-up** polls the screen and only re-prompts when a **perceptual hash** sees a meaningful change; the model either gives the next step or stays quiet (`WAIT`). **Lesson overlay** alignment restricts tools to **`point_at_element`** so YouTube-derived steps land on **live** pixels. **Onboarding** uses a **cursor-screen-only** image and a **restricted tool allowlist**. **Guided automation** defaults to **`runComputerUseAgentLoop`** (Anthropic **Computer Use** `computer_20251124`): JPEGs resized to **declared tool geometry**, JSONL + rollup telemetry, stuck detection, and the loop **stops on the first deny-list refusal**; a legacy one-shot **CGEvent** path remains a **debug-only** escape hatch—both paths require the same product opt-ins and **per-sequence consent**. **`ElementLocationDetector`** makes a separate Computer Use–shaped call for **high-precision coordinates** (aspect-ratio-matched resize, mapped back to display points). **YouTube lessons** pull captions through the Worker, then Claude turns the transcript into **structured step JSON** with timestamps. **Session observation** feeds **SessionCompressor** (plus an optional **cold-start recap** from the latest session). **ResearchSourceCompressor** distills ingested sources into wiki pages. **WikiPageConsolidator** merges duplicate or overlapping pages. Those structured outputs feed **`WikiQueryEngine`**, which is what **`query_wiki`** retrieves. **SQLite** (`PatternDatabase`) backs lesson progress, tutor rate limits, and related analytics—see [`CLAUDE.md`](CLAUDE.md) for the full file map.
+Claude Cursor is a Mac app that lives in your menu bar (no dock icon). Ask it a question by voice or text, and it looks at your actual screen and helps you right where you're working: pointing at the exact button to click, explaining what's in front of you, or walking you through a task step by step. A transparent overlay floats on top of everything to point and label things, and it never steals focus from the app you're using.
 
-**Integration quality (short).** The Worker forwards **`anthropic-beta`** for Computer Use; **SSE** keeps the overlay responsive; iteration caps and run telemetry bound cost and runaway loops. Deeper architecture lives in [`CLAUDE.md`](CLAUDE.md).
+How it works (high level)
+1. You hold a hotkey and talk (or type a question).
+2. The app captures your screen plus what you said and sends both to Claude.
+3. Claude doesn't just reply with text. It takes real actions on screen: moves a pointer to the right spot, labels on-screen elements, pulls up a saved how-to, starts a tutorial, or (only with your permission) automates a sequence of clicks.
+4. It remembers what you've done before in a local knowledge base, so it gets more useful on your specific Mac over time instead of starting fresh each session.
 
-## What could go wrong, and what safeguards you've built in
+Two things stay true throughout: secret API keys never ship inside the app (it talks to the AI through a small proxy server you control), and anything high-impact like automating clicks is opt-in and asks for your consent each time.
+
+Under the hood (for the technically curious)
+- **App:** Swift (SwiftUI + AppKit), menu-bar only, with a non-activating cursor overlay so pointing and explanations never interrupt your work.
+- **Screen vision:** ScreenCaptureKit (multi-monitor, can focus a single window).
+- **Voice:** push-to-talk into a pluggable transcription layer (AssemblyAI by default; Whisper or Apple Speech optional). Replies can be read aloud via ElevenLabs.
+- **The AI:** Claude runs as an agent using native tool calls (point at an element, explain the screen, query the local wiki, start a YouTube-based lesson, run automation). Responses stream in real time (SSE) to keep the overlay snappy.
+- **Automation:** built on Anthropic's Computer Use. Loops are bounded, log telemetry, detect when they're stuck, and stop on the first blocked action. A deny-list of sensitive apps, per-action consent, and a kill switch gate the whole thing.
+- **Memory:** past sessions and researched sources are compressed into local wiki pages (duplicates merged), stored in SQLite, and retrieved on later questions so knowledge compounds locally.
+
+## What could go wrong, and what safeguards I've built in
 
 | Risk | Mitigation |
 |------|------------|
@@ -33,10 +59,6 @@ Privacy- and safety-oriented design choices (what we minimized on the device, wh
 | **Over-trusting the model** | Pointing and steps are **assistive**; clipboard auto-copy **strips internal coordination tags** so pasted text stays clean. |
 
 Nothing removes the need for judgment in high-stakes or regulated environments—treat the companion like a very fast intern with a view of your desk.
-
-## How your project empowers rather than replaces people
-
-The app is designed to **shorten the gap between question and action** on *your* machine: you stay in the driver’s seat, in the app you care about, while the companion **narrates, points, and (only with consent) automates**. Push-to-talk keeps control **rhythm-based**—you decide when you are “on the record.” Tutor and lesson modes bias toward **scaffolding** (what to look at next, why it matters) rather than black-box completion of your work. The local wiki and session summaries aim to **compound what you learned**, not to substitute for understanding.
 
 ## Ethical alignment and responsible use
 
@@ -190,29 +212,3 @@ The app will appear in your menu bar (not the dock). Click the icon to open the 
 - **Accessibility** — for the global keyboard shortcut (Control + Option)
 - **Screen Recording** — for taking screenshots when you use the hotkey
 - **Screen Content** — for ScreenCaptureKit access
-
-## Architecture (short)
-
-For the full technical breakdown, read [`CLAUDE.md`](CLAUDE.md). In one sentence: **menu bar SwiftUI + AppKit**, **Worker-proxied** Claude / STT / TTS, **ScreenCaptureKit** vision, **SSE** streaming, optional **Computer Use** and local automation behind **consent**, local **wiki + SQLite** for memory and lessons.
-
-## Project structure
-
-```
-claude-cursor/           # Swift source
-  CompanionManager.swift    # Central state machine
-  CompanionPanelView.swift  # Menu bar panel UI
-  ClaudeAPI.swift           # Claude streaming client
-  ElevenLabsTTSClient.swift # Text-to-speech playback
-  OverlayWindow.swift       # Blue cursor overlay
-  AssemblyAI*.swift         # Real-time transcription
-  BuddyDictation*.swift     # Push-to-talk pipeline
-worker/                  # Cloudflare Worker proxy (`cc-proxy` in wrangler.toml)
-  src/index.ts              # Routes: /chat, /tts, /transcribe-token, /youtube-transcript, /whisper, /web-search, /fetch-url
-CLAUDE.md                # Full architecture doc (agents read this)
-```
-
-## Contributing
-
-PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
-
-Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
