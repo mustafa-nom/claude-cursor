@@ -2,7 +2,7 @@
 
 Your AI-native Mac companion that tutors you in any app with voice Q&A, live navigation tips, on-cursor pointing, and step-by-step tutorials.
 
-## What problem you're solving and who it's for
+## The problem & who it's for
 
 **Problem:** Explaining software or getting unstuck usually means breaking flow—tabbing to a browser, re-describing your screen, or watching a generic tutorial that does not match your layout, monitor count, or exact app state.
 
